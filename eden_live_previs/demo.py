@@ -29,7 +29,8 @@ COLORS = {
 def _material(name, color):
     mat = bpy.data.materials.get(f"EdenDemo_{name}") or bpy.data.materials.new(f"EdenDemo_{name}")
     mat.diffuse_color = color
-    mat.use_nodes = True
+    if mat.node_tree is None:  # Blender 5.0+ materials always have a node tree
+        mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     if bsdf is not None:
         bsdf.inputs["Base Color"].default_value = color

@@ -5,8 +5,8 @@ import time
 import bpy
 
 from . import capture, demo, deps, imaging, live
-from .backends import MockBackend, ReactorBackend
-from .prefs import get_api_key, get_prefs
+from .backends import MockBackend, ReactorBackend, api_url
+from .prefs import get_api_key, use_mock
 from .props import get_settings, prompt_value
 from .recorder import Recorder
 from .session import UserError, get_session
@@ -24,12 +24,9 @@ def eden_dir():
 
 
 def backend_factory(context):
-    """Return (factory, label) for the configured backend, or raise UserError."""
-    prefs = get_prefs(context)
-    if prefs is None or prefs.backend == "MOCK":
-        latency = prefs.mock_latency if prefs else 1.0
-        echo = prefs.mock_echo_tags if prefs else False
-        return (lambda cb: MockBackend(cb, latency=latency, echo_tags=echo)), MockBackend.label
+    """Return (factory, label) for the backend to use, or raise UserError."""
+    if use_mock():
+        return (lambda cb: MockBackend(cb)), MockBackend.label
     ok, detail = deps.sdk_status()
     if not ok:
         raise UserError("Reactor SDK not available. Use a platform-specific build or Preferences > Add-ons > EdenLive > Install.")
@@ -37,14 +34,15 @@ def backend_factory(context):
         raise UserError("Online access is disabled: Preferences > System > Network > Allow Online Access.")
     key = get_api_key(context)
     if not key:
-        raise UserError("Add your Reactor API key (Preferences > Add-ons > EdenLive, or the field in this panel).")
-    session = get_session()
-    session.add_secret(key)
-    api_url = prefs.api_url.strip() or None
-    max_seconds = prefs.max_session_minutes * 60
+        raise UserError("Add your Reactor API key (the field in this panel, or the add-on preferences).")
+    try:
+        url = api_url()
+    except ValueError as exc:
+        raise UserError(f"{exc} Check the REACTOR_API_URL environment variable.")
+    get_session().add_secret(key)
 
     def factory(cb):
-        return ReactorBackend(cb, key, api_url=api_url, max_session_seconds=max_seconds)
+        return ReactorBackend(cb, key, api_url=url)
 
     return factory, ReactorBackend.label
 
@@ -284,7 +282,6 @@ class EDENLIVE_OT_open_preview(bpy.types.Operator):
 def recorder_settings(context, settings):
     scene = context.scene
     session = get_session()
-    prefs = get_prefs(context)
     path = resolve_path(settings.reference_path) if settings.reference_path else ""
     prompt = prompt_value(settings)
     if not path or not os.path.isfile(path):
@@ -293,7 +290,7 @@ def recorder_settings(context, settings):
         raise UserError("Write a prompt first.")
     if scene.camera is None:
         raise UserError("The scene needs an active camera to record.")
-    mock = session.backend_label == MockBackend.label or (prefs is not None and prefs.backend == "MOCK")
+    mock = session.backend_label == MockBackend.label or use_mock()
     scene_fps = scene.render.fps / scene.render.fps_base
     stream_fps = max(10.0, min(60.0, scene_fps))
     out_dir = resolve_path(settings.record_dir or "//eden_live_renders/")
@@ -309,8 +306,6 @@ def recorder_settings(context, settings):
         "prompt": prompt,
         "seed": settings.seed,
         "reference_pixels": reference_pixels_for(path, mock),
-        "encoder": settings.record_encoder,
-        "ffmpeg_path": bpy.path.abspath(prefs.ffmpeg_path) if prefs and prefs.ffmpeg_path else "",
         "keep_frames": settings.record_keep_frames,
         "warmup_timeout": 90.0,
     }

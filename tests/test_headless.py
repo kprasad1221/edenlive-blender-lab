@@ -2,7 +2,7 @@
 
     blender -b --factory-startup --python tests/test_headless.py
 
-Covers: add-on registration, pixel helpers, frame alignment, the demo scene,
+Covers: add-on registration, the settings surface, API URL handling, pixel helpers, frame alignment, the demo scene,
 render-engine frame capture, a mock EdenLive session, and the full
 record -> align -> MP4 pipeline with both encoders. Exits non-zero on failure.
 """
@@ -179,7 +179,7 @@ def test_mock_session():
     session.shutdown()
 
 
-def _record(name, encoder, echo_tags, n_frames=48):
+def _run_recording(name, encoder, echo_tags, n_frames, keep_frames=True):
     scene = bpy.context.scene
     scene.frame_start, scene.frame_end = 1, n_frames
     session = EdenSession()
@@ -198,7 +198,7 @@ def _record(name, encoder, echo_tags, n_frames=48):
         "seed": 3,
         "reference_pixels": capture.load_image_bgra(ref, max_side=256),
         "encoder": encoder,
-        "keep_frames": True,
+        "keep_frames": keep_frames,
         "warmup_timeout": 30.0,
     }
     rec = Recorder(session, settings)
@@ -215,8 +215,15 @@ def _record(name, encoder, echo_tags, n_frames=48):
         rec.poll()
         time.sleep(0.02)
         assert time.perf_counter() < deadline, f"stuck in {rec.phase}"
-    assert rec.phase == "DONE", rec.message
     session.shutdown()
+    return rec, settings, drafts, capture_s
+
+
+def _record(name, encoder, echo_tags, n_frames=48):
+    rec, settings, drafts, capture_s = _run_recording(name, encoder, echo_tags, n_frames)
+    assert rec.phase == "DONE", rec.message
+    expected = "in-process Blender" if encoder == "INPROCESS" else "background Blender"
+    assert rec.report["encoder"] == expected, rec.report
 
     report = rec.report
     print(f"  {name}: capture {capture_s:.1f}s, report {report}")
@@ -251,22 +258,111 @@ def _record(name, encoder, echo_tags, n_frames=48):
     return rec
 
 
-@check("record pipeline: mock, draft matching, ffmpeg encoder")
-def test_record_ffmpeg():
-    if not encode.find_ffmpeg():
-        print("  ffmpeg not on PATH; skipped")
-        return
-    _record("take_ffmpeg", "FFMPEG", echo_tags=False)
+@check("record pipeline: mock, draft matching, background Blender encoder")
+def test_record_background():
+    _record("take_background", "AUTO", echo_tags=False)
 
 
-@check("record pipeline: mock, frame tags, Blender encoder")
-def test_record_blender():
-    _record("take_blender", "BLENDER", echo_tags=True)
+@check("record pipeline: mock, frame tags, in-process Blender encoder")
+def test_record_inprocess():
+    _record("take_inprocess", "INPROCESS", echo_tags=True)
+
+
+@check("api url: hardcoded default, normalization, REACTOR_API_URL override")
+def test_api_url():
+    norm = backends.normalize_api_url
+    assert norm("") == norm(None) == norm("   ") == "https://api.reactor.inc"
+    assert norm("api.reactor.inc") == "https://api.reactor.inc"
+    assert norm("api.reactor.inc/") == "https://api.reactor.inc"
+    assert norm(" https://api.reactor.inc/// ") == "https://api.reactor.inc"
+    assert norm("HTTPS://api.reactor.inc") == "https://api.reactor.inc"
+    assert norm("http://localhost:8080/") == "http://localhost:8080"
+    assert norm("staging.example.com/api/") == "https://staging.example.com/api"
+    for bad in ("ftp://api.reactor.inc", "https://", "://"):
+        try:
+            norm(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} should be rejected")
+    old = os.environ.pop("REACTOR_API_URL", None)
+    try:
+        assert backends.api_url() == "https://api.reactor.inc"
+        os.environ["REACTOR_API_URL"] = "staging.example.com/"
+        assert backends.api_url() == "https://staging.example.com"
+    finally:
+        os.environ.pop("REACTOR_API_URL", None)
+        if old is not None:
+            os.environ["REACTOR_API_URL"] = old
+    backend = backends.ReactorBackend(None, "rk_test", api_url="api.reactor.inc/")
+    assert backend._api_url == "https://api.reactor.inc"
+    assert backends.ReactorBackend(None, "rk_test")._api_url == "https://api.reactor.inc"
+
+
+@check("user-visible settings: preferences hold only the API key")
+def test_settings_surface():
+    from eden_live_previs import prefs as prefs_module, props
+
+    assert set(prefs_module.EDENLIVE_AP_preferences.__annotations__) == {"api_key"}
+    assert set(props.EdenLiveSettings.__annotations__) == {
+        "reference_path", "prompt", "prompt_text", "seed", "source_mode", "fps", "hide_overlays", "show_draft",
+        "record_dir", "record_name", "record_method", "record_tail", "record_keep_frames",
+    }
+    old = os.environ.pop("EDEN_LIVE_MOCK", None)
+    try:
+        assert not prefs_module.use_mock()
+        os.environ["EDEN_LIVE_MOCK"] = "1"
+        assert prefs_module.use_mock()
+    finally:
+        os.environ.pop("EDEN_LIVE_MOCK", None)
+        if old is not None:
+            os.environ["EDEN_LIVE_MOCK"] = old
+
+
+@check("record: background-encode failure falls back to encoding in-process")
+def test_background_fallback():
+    real = encode.start_background_encode
+
+    def failing(jobs, work_dir, blender_binary=None):
+        log = os.path.join(work_dir, "encode.log")
+        with open(log, "w") as f:
+            f.write("simulated background crash\n")
+        return subprocess.Popen([sys.executable, "-c", "raise SystemExit(3)"]), log
+
+    encode.start_background_encode = failing
+    try:
+        rec, *_ = _run_recording("take_fallback", "AUTO", echo_tags=True, n_frames=12, keep_frames=False)
+    finally:
+        encode.start_background_encode = real
+    assert rec.phase == "DONE", rec.message
+    assert rec.report["encoder"] == "in-process Blender", rec.report
+    assert os.path.getsize(rec.outputs["main"]) > 10000
+    assert not os.path.isdir(rec.work_dir), "work dir should be cleaned up after success"
+
+
+@check("record: a failed encode keeps the PNG frames and says where")
+def test_failed_encode_keeps_frames():
+    real_start, real_encode = encode.start_background_encode, encode.blender_encode
+    encode.start_background_encode = lambda *a, **k: (_ for _ in ()).throw(OSError("simulated: cannot start"))
+    encode.blender_encode = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("simulated encoder failure"))
+    try:
+        rec, *_ = _run_recording("take_failed", "AUTO", echo_tags=True, n_frames=12, keep_frames=False)
+    finally:
+        encode.start_background_encode, encode.blender_encode = real_start, real_encode
+    assert rec.phase == "ERROR", rec.phase
+    assert "simulated encoder failure" in rec.message and "cannot start" in rec.message, rec.message
+    assert rec.kept_frames and rec.kept_frames in rec.message, rec.message
+    main_dir = os.path.join(rec.kept_frames, "main")
+    pngs = [n for n in os.listdir(main_dir) if n.endswith(".png")]
+    assert len(pngs) == 12, pngs
+    assert not os.path.exists(os.path.join(rec.work_dir, "drafts.npy"))
+    print(f"  kept {len(pngs)} aligned frames in {main_dir}")
 
 
 def main():
-    for test in (test_register, test_imaging, test_align, test_demo_capture, test_mock_session,
-                 test_record_ffmpeg, test_record_blender):
+    for test in (test_register, test_imaging, test_align, test_api_url, test_settings_surface, test_demo_capture,
+                 test_mock_session, test_record_background, test_record_inprocess, test_background_fallback,
+                 test_failed_encode_keeps_frames):
         test()
     try:
         addon.unregister()

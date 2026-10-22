@@ -16,8 +16,8 @@ look.
 
 ![Sidebar panel and split preview (offline mock backend)](docs/media/panel_recording_mock.png)
 *The EdenLive sidebar while recording, with the split preview (draft on the left, output on the
-right). This screenshot uses the built-in **offline mock** backend, which only repaints the
-draft. Real EdenLive output is far more detailed.*
+right). This screenshot uses the developer-only **offline mock** backend (`EDEN_LIVE_MOCK=1`), which
+only repaints the draft. Real EdenLive output is far more detailed.*
 
 ---
 
@@ -29,6 +29,7 @@ draft. Real EdenLive output is far more detailed.*
 - [Quick start](#quick-start)
 - [Demo: colored cubes to a jungle temple](#demo-colored-cubes-to-a-jungle-temple)
 - [Recording to MP4](#recording-to-mp4)
+- [Settings](#settings)
 - [Architecture](#architecture)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -36,8 +37,8 @@ draft. Real EdenLive output is far more detailed.*
 
 ## Requirements
 
-- **Blender 4.2 or newer** (tested on 4.2.3 LTS). Installs as a Blender extension. A legacy
-  add-on zip is provided as well.
+- **Blender 4.2 or newer** (tested on 4.2.3 LTS and 5.2.3 LTS, which bundle Python 3.11 and
+  3.13). Installs as a Blender extension. A legacy add-on zip is provided as well.
 - **OS**: Windows x64, macOS 11+ on Apple Silicon or macOS 13+ on Intel, Linux x64 with glibc
   2.34+ (Ubuntu 22.04+, Debian 12+, RHEL 9+). These are the platforms the Reactor Python SDK
   ships native builds for.
@@ -101,12 +102,12 @@ session-scoped token on connect, so the key itself is only sent to `api.reactor.
 Open the sidebar in the 3D Viewport (**N**), then the **EdenLive** tab.
 
 1. **Connect.** Opens a session on `reactor/eden-live` (GPU assignment can take a moment) and
-   starts streaming the draft view as `source_video` at the chosen *Stream FPS*.
+   starts streaming the draft view as `source_video`.
 2. **Look > Reference.** Pick a PNG, JPEG or WebP, or click **Capture** to save the current
    camera view and use it.
-3. **Look > Prompt.** Describe the world you want. With *Send edits live* on, edits are sent with
-   `set_prompt` about 0.6 s after you stop typing and apply from the next generated chunk. For
-   long prompts, point *Text* at a Text datablock.
+3. **Look > Prompt.** Describe the world you want. Edits are sent live with `set_prompt` and
+   apply from the next generated chunk. For long prompts, point *Text* at a Text datablock and
+   press **Send** after editing it.
 4. **Start.** Uploads the reference, stages the prompt and creates a world.
 5. **Preview: Split** shows the output next to your viewport, and **Window** opens a separate
    window (e.g. for a second monitor). Tick **Draft side by side** to see the returned
@@ -152,13 +153,14 @@ scene uses that exact resolution.
    because nothing streams yet.
 2. **Stream.** The add-on starts a fresh world, holds the first frame until EdenLive returns its
    first chunk, then plays the frames at exactly the scene's fps (clamped to 10-60), and holds the
-   last frame for *Tail* seconds to collect delayed output. It then pauses the world. Returned
+   last frame for a few seconds (*Advanced > Tail*) to collect delayed output. It then pauses the world. Returned
    frames are written to disk as they arrive.
 3. **Align and encode.** Returned `draft_video` frames are matched back to the frames that were
    sent, so each generated frame lands on its timeline frame. The add-on uses frame tags when the
    model echoes them, otherwise thumbnail matching plus the measured latency.
 
-Outputs, in *Output* (default `//eden_live_renders/`):
+Outputs, in *Output* (empty by default: an `eden_live_renders` folder next to your .blend
+file, or in the temp folder while the file is unsaved):
 
 | File | Contents |
 |---|---|
@@ -167,9 +169,40 @@ Outputs, in *Output* (default `//eden_live_renders/`):
 | `<take>_raw.mp4` | Everything EdenLive returned, in arrival order, at the stream rate. |
 | `<take>_report.json` | Frame counts, measured latency, alignment coverage, prompt, seed. |
 
-Encoding uses `ffmpeg` from PATH (or the path set in preferences) in the background. Without
-it, the add-on falls back to Blender's built-in FFmpeg through a temporary Video Sequencer
-scene, so no external tools are needed. Press **Esc** to cancel a recording.
+Encoding uses Blender's own FFmpeg (H.264 through a temporary Video Sequencer scene), so there
+is nothing extra to install. It runs in a separate background Blender process, so the UI stays
+responsive while it encodes; if that process can't run, the add-on encodes in the current
+Blender instead. Press **Esc** to cancel a recording.
+
+If encoding fails anyway, the frames are never thrown away. The error names the folder that
+holds the PNG sequences (`<take>_work/seq/main` is the aligned output, `seq/draft` is the
+draft, `seq/raw` is the raw stream), and **Open Frames Folder** appears under Record. Encode
+them with any tool, e.g. drag the folder into Blender's Video Sequencer, or
+`ffmpeg -framerate 24 -i <take>_work/seq/main/f_%06d.png -c:v libx264 -pix_fmt yuv420p out.mp4`.
+
+## Settings
+
+Everything a normal workflow needs is in the sidebar; the add-on preferences hold only your
+**Reactor API Key**.
+
+| Where | Setting | What it does |
+|---|---|---|
+| Sidebar | API Key | Same as the preference; stored in user preferences, never in .blend files. |
+| Look | Reference | Appearance reference image (with **Capture** / **Use Output**). |
+| Look | Prompt / Text | Scene description, sent live; optionally from a Text datablock. |
+| Live Preview | Draft view | Stream the active camera (1280×704) or the viewport's current view. |
+| Live Preview | Draft side by side | Show the returned draft next to the output in the preview. |
+| Record | Start / End | The scene's frame range. |
+| Record | Output, Take | Where the MP4s go and their name prefix. |
+| Advanced (collapsed) | Seed | World seed for `start`; the same seed, reference and draft repeat a world. |
+| Advanced | Stream FPS | Live stream rate (10-60, default 20). Recording always uses the scene fps. |
+| Advanced | Hide overlays | Capture drafts without grid, gizmos and outlines (default on). |
+| Advanced | Draft render | *Viewport (fast)* or *Render engine* for recorded drafts. |
+| Advanced | Tail | Seconds to keep streaming the last frame while recording (default 3). |
+| Advanced | Keep PNG frames | Keep the PNG sequences next to the MP4s. |
+
+Sessions are capped at 60 minutes so a forgotten session can't run up a bill; press Connect
+again to continue.
 
 ## Architecture
 
@@ -222,7 +255,7 @@ renders with the scene's engine instead.
 connect, publish `source_video`, `set_source({source: "client"})`; on Start, `set_paused(true)` if
 a world is playing, `upload_file` the reference, `set_image`, `set_prompt`, `start({seed})`;
 `set_prompt` for live edits; `set_paused` for pause and resume; `state_update` snapshots drive
-the panel; and the session is disconnected on Stop or quit, capped by *Max session length*.
+the panel; and the session is disconnected on Stop or quit, and capped at 60 minutes.
 
 Code map (`eden_live_previs/`):
 
@@ -243,6 +276,7 @@ Code map (`eden_live_previs/`):
 |---|---|
 | "Online access is disabled" | Preferences > System > Network > **Allow Online Access**. |
 | "Reactor SDK not available" | Install the zip for *your* platform, or click **Install Reactor SDK** in the add-on preferences (legacy/git installs). On Linux the SDK needs glibc 2.34+. |
+| `ValueError: unknown url type: 'api.reactor.inc/tokens'` | Fixed in 0.1.0+: the API endpoint is built in (`https://api.reactor.inc`). Update the add-on. |
 | `AuthError ... 401 Invalid API key` | Re-copy the `rk_...` key from the dashboard; check for spaces. |
 | Status stays at *connecting (waiting)* | Reactor is assigning a GPU; this can take a while under load. Check the **Log** subpanel. |
 | `Start` refused: *image_required* / *prompt_required* | Pick a reference image / write a prompt. |
@@ -252,8 +286,8 @@ Code map (`eden_live_previs/`):
 | "Draft capture 1 fps (300 ms each)" in the panel | Capture is slow (software OpenGL, heavy scene, Rendered shading). Use Solid shading; the stream rate stays steady regardless. |
 | "The 3D Viewport did not redraw" | Keep a 3D Viewport visible (not minimized) while streaming or recording with *Viewport (fast)*, or switch *Draft render* to *Render engine*. |
 | Black or empty preview | Click **Start**: until a world starts, EdenLive shows the staged reference, or black before one is staged. |
-| MP4 not written | Check the Record status line and `<take>_report.json`; set an ffmpeg path, or choose the *Blender* encoder. |
-| Want to try without a key | Preferences > Add-ons > EdenLive Pre-vis > Backend: **Offline mock**. |
+| MP4 not written | The PNG frames are kept: see the Record status line or **Open Frames Folder**, and `<take>_work/encode.log` for what Blender's encoder said. |
+| "Connection to Reactor closed (sessions end after 60 minutes)" | The session hit the 60-minute cap or dropped; press Connect. |
 
 ## Development
 
@@ -267,10 +301,18 @@ tests/test_live_reactor.py   real reactor/eden-live session (needs REACTOR_API_K
 ```
 
 ```bash
-blender -b --factory-startup --python tests/test_headless.py      # 8 checks, ~1 min
+blender -b --factory-startup --python tests/test_headless.py      # 12 checks, ~2 min
 blender --python tests/test_ui.py                                  # opens Blender, quits when done
 REACTOR_API_KEY=rk_... blender -b --factory-startup --python tests/test_live_reactor.py
 ```
+
+Developer environment variables (not exposed in the UI):
+
+| Variable | Effect |
+|---|---|
+| `EDEN_LIVE_MOCK=1` | Use the offline mock backend instead of Reactor: repaints the draft with the reference's palette after ~1 s, following EdenLive's commands, refusal codes and tracks. Handy for UI work without a key or billing. |
+| `REACTOR_API_URL` | Override the Reactor API base URL (normalized: `https://` added, trailing `/` removed). |
+| `REACTOR_API_KEY` | Used when the API key preference is empty. |
 
 `test_live_reactor.py` connects, saves the model's runtime schema to `schema.json`, checks the
 tracks and commands this add-on relies on, records 48 demo frames through EdenLive and writes

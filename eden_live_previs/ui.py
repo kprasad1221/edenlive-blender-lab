@@ -1,7 +1,7 @@
 import bpy
 
 from . import deps, live
-from .prefs import get_api_key, get_prefs
+from .prefs import get_api_key, get_prefs, use_mock
 from .session import get_session
 
 STATUS_ICONS = {
@@ -26,7 +26,7 @@ class EDENLIVE_PT_main(EdenLivePanel, bpy.types.Panel):
         layout = self.layout
         session = get_session()
         prefs = get_prefs(context)
-        mock = prefs is not None and prefs.backend == "MOCK"
+        mock = use_mock()
 
         col = layout.column(align=True)
         status = session.status
@@ -36,16 +36,13 @@ class EDENLIVE_PT_main(EdenLivePanel, bpy.types.Panel):
         if session.last_error:
             col.label(text=session.last_error, icon="ERROR")
 
-        if prefs is not None:
-            layout.prop(prefs, "backend", text="")
-            if not mock:
-                row = layout.row(align=True)
-                row.prop(prefs, "api_key", text="API Key")
-                if not prefs.api_key and get_api_key(context):
-                    layout.label(text="Using REACTOR_API_KEY env var", icon="INFO")
-                ok, _ = deps.sdk_status()
-                if not ok:
-                    layout.label(text="Reactor SDK missing: see add-on preferences", icon="ERROR")
+        if prefs is not None and not mock:
+            layout.prop(prefs, "api_key", text="API Key")
+            if not prefs.api_key and get_api_key(context):
+                layout.label(text="Using REACTOR_API_KEY env var", icon="INFO")
+            ok, _ = deps.sdk_status()
+            if not ok:
+                layout.label(text="Reactor SDK missing: see add-on preferences", icon="ERROR")
 
         row = layout.row(align=True)
         row.scale_y = 1.3
@@ -71,11 +68,10 @@ class EDENLIVE_PT_look(EdenLivePanel, bpy.types.Panel):
         layout.label(text="Prompt")
         if settings.prompt_text is None:
             layout.prop(settings, "prompt", text="")
-        layout.prop(settings, "prompt_text", text="Text")
         row = layout.row(align=True)
-        row.prop(settings, "live_prompt")
-        row.operator("eden_live.send_prompt", text="Send", icon="EXPORT")
-        layout.prop(settings, "seed")
+        row.prop(settings, "prompt_text", text="Text")
+        if settings.prompt_text is not None:
+            row.operator("eden_live.send_prompt", text="Send", icon="EXPORT")
 
 
 class EDENLIVE_PT_live(EdenLivePanel, bpy.types.Panel):
@@ -88,11 +84,7 @@ class EDENLIVE_PT_live(EdenLivePanel, bpy.types.Panel):
         session = get_session()
         st = session.state
 
-        col = layout.column(align=True)
-        col.prop(settings, "source_mode")
-        col.prop(settings, "fps")
-        col.prop(settings, "hide_overlays")
-
+        layout.prop(settings, "source_mode")
         row = layout.row(align=True)
         row.scale_y = 1.3
         row.operator("eden_live.start", icon="PLAY")
@@ -114,12 +106,9 @@ class EDENLIVE_PT_live(EdenLivePanel, bpy.types.Panel):
             if st.get("started"):
                 world = f"#{st.get('world_id')} {'paused' if paused else 'running'}"
             box.label(text=f"World: {world}  chunks: {st.get('chunks', 0)}")
-            secs = st.get("seconds")
             box.label(text=f"Sending {session.in_meter.rate():.0f} fps, receiving {session.out_meter.rate():.0f} fps")
             box.label(text=f"Draft capture {live.state.capture_meter.rate():.0f} fps "
                       f"({live.state.capture_cost * 1000:.0f} ms each)")
-            if secs is not None:
-                box.label(text=f"Last chunk took {secs:.2f} s")
         if live.state.capture_error:
             layout.label(text=live.state.capture_error, icon="ERROR")
 
@@ -136,12 +125,8 @@ class EDENLIVE_PT_record(EdenLivePanel, bpy.types.Panel):
         row = col.row(align=True)
         row.prop(scene, "frame_start", text="Start")
         row.prop(scene, "frame_end", text="End")
-        col.prop(settings, "record_method")
-        col.prop(settings, "record_tail")
         col.prop(settings, "record_dir")
         col.prop(settings, "record_name")
-        col.prop(settings, "record_encoder")
-        col.prop(settings, "record_keep_frames")
 
         rec = live.state.recorder
         if rec is None:
@@ -151,9 +136,38 @@ class EDENLIVE_PT_record(EdenLivePanel, bpy.types.Panel):
             last = live.state.last_recorder
             if last is not None:
                 layout.label(text=last.message, icon="CHECKMARK" if last.phase == "DONE" else "INFO")
+                if last.kept_frames:
+                    layout.operator("wm.path_open", text="Open Frames Folder", icon="FILE_FOLDER").filepath = (
+                        last.kept_frames
+                    )
+                elif last.phase == "DONE":
+                    layout.operator("wm.path_open", text="Open Output Folder", icon="FILE_FOLDER").filepath = (
+                        last.out_dir
+                    )
         else:
             layout.progress(factor=rec.progress, type="BAR", text=rec.message)
             layout.label(text="Esc cancels", icon="EVENT_ESC")
+
+
+class EDENLIVE_PT_advanced(EdenLivePanel, bpy.types.Panel):
+    bl_label = "Advanced"
+    bl_parent_id = "EDENLIVE_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        settings = context.scene.eden_live
+        col = layout.column()
+        col.prop(settings, "seed")
+        col.prop(settings, "fps")
+        col.prop(settings, "hide_overlays")
+        layout.separator()
+        col = layout.column()
+        col.prop(settings, "record_method")
+        col.prop(settings, "record_tail")
+        col.prop(settings, "record_keep_frames")
 
 
 class EDENLIVE_PT_log(EdenLivePanel, bpy.types.Panel):
@@ -167,4 +181,4 @@ class EDENLIVE_PT_log(EdenLivePanel, bpy.types.Panel):
             col.label(text=line)
 
 
-classes = (EDENLIVE_PT_main, EDENLIVE_PT_look, EDENLIVE_PT_live, EDENLIVE_PT_record, EDENLIVE_PT_log)
+classes = (EDENLIVE_PT_main, EDENLIVE_PT_look, EDENLIVE_PT_live, EDENLIVE_PT_record, EDENLIVE_PT_advanced, EDENLIVE_PT_log)

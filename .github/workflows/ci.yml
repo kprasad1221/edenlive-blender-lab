@@ -6,12 +6,15 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  BLENDER_VERSION: "4.2.3"
-
 jobs:
   test-and-build:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        blender: ["4.2.3", "5.2.3"]
+    env:
+      BLENDER_VERSION: ${{ matrix.blender }}
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +41,8 @@ jobs:
         timeout-minutes: 10
         if: steps.cache-blender.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL "https://download.blender.org/release/Blender4.2/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar xJ
+          series="${BLENDER_VERSION%.*}"
+          curl -fsSL "https://download.blender.org/release/Blender${series}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar xJ
           mv "blender-${BLENDER_VERSION}-linux-x64" blender
 
       - name: Headless tests (mock backend, frame capture, record -> MP4)
@@ -55,6 +59,7 @@ jobs:
           blender/blender -b --python-expr "import addon_utils, reactor_sdk, sys; assert addon_utils.check('bl_ext.user_default.eden_live_previs')[1]; print('reactor-sdk', reactor_sdk.__version__)"
 
       - uses: actions/upload-artifact@v4
+        if: matrix.blender == '4.2.3'
         with:
           name: eden-live-previs-zips
           path: dist/*.zip

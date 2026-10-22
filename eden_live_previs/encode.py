@@ -1,22 +1,19 @@
-"""Turn PNG frame lists into MP4 files.
+"""Turn PNG frame sequences into MP4 with Blender's built-in FFmpeg.
 
-Two encoders:
-- ``ffmpeg`` on PATH (or a path set in preferences): runs in a worker thread.
-- Blender itself: a temporary scene whose Video Sequencer holds the frames,
-  rendered with Blender's built-in FFmpeg (H.264). Needs no external tools but
-  runs on the main thread.
+The frames go into a temporary scene's Video Sequencer, which is rendered to
+H.264. ``start_background_encode`` does this in a separate ``blender -b`` process
+(this file is its entry script), so the UI stays responsive; ``encode_jobs`` does
+it in the current process and is the fallback.
+
+A job is a dict: ``out_path``, ``fps``, ``height`` and ``layers``, a list of
+``[sequence_dir, filenames, width]`` placed left to right.
 """
 
+import json
 import os
 import shutil
 import subprocess
 import sys
-
-
-def find_ffmpeg(preferred=""):
-    if preferred and os.path.isfile(preferred):
-        return preferred
-    return shutil.which("ffmpeg")
 
 
 def link_sequence(files, out_dir, prefix="f_"):
@@ -36,35 +33,8 @@ def link_sequence(files, out_dir, prefix="f_"):
     return names
 
 
-def _fps_arg(fps):
-    return f"{fps:.6f}".rstrip("0").rstrip(".")
-
-
-def ffmpeg_encode(ffmpeg, out_path, fps, sequence_dirs, prefix="f_"):
-    """Encode one or more numbered sequences (stacked horizontally) to MP4."""
-    cmd = [ffmpeg, "-y", "-loglevel", "error"]
-    for seq_dir in sequence_dirs:
-        cmd += ["-framerate", _fps_arg(fps), "-i", os.path.join(seq_dir, f"{prefix}%06d.png")]
-    if len(sequence_dirs) > 1:
-        cmd += ["-filter_complex", f"hstack=inputs={len(sequence_dirs)}"]
-    flags = {}
-    if sys.platform == "win32":
-        flags["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    last_error = ""
-    for codec in (["-c:v", "libx264", "-preset", "medium", "-crf", "18"], ["-c:v", "mpeg4", "-q:v", "3"]):
-        full = cmd + codec + ["-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
-        proc = subprocess.run(full, capture_output=True, text=True, **flags)
-        if proc.returncode == 0:
-            return out_path
-        last_error = proc.stderr.strip()[-500:]
-    raise RuntimeError(f"ffmpeg failed: {last_error}")
-
-
 def blender_encode(out_path, fps, layers, height):
-    """Encode with Blender's sequencer.
-
-    layers: list of (sequence_dir, filenames, width); placed left to right.
-    """
+    """Encode one MP4 with Blender's sequencer (main thread of a Blender process)."""
     import bpy
 
     total_w = sum(w for _, _, w in layers)
@@ -87,6 +57,8 @@ def blender_encode(out_path, fps, layers, height):
         scene.view_settings.gamma = 1.0
         render.use_sequencer = True
         render.use_compositing = False
+        if hasattr(render.image_settings, "media_type"):  # Blender 5.0+
+            render.image_settings.media_type = "VIDEO"
         render.image_settings.file_format = "FFMPEG"
         render.ffmpeg.format = "MPEG4"
         render.ffmpeg.codec = "H264"
@@ -97,9 +69,10 @@ def blender_encode(out_path, fps, layers, height):
         render.filepath = out_path
 
         editor = scene.sequence_editor_create()
+        strips = editor.strips if hasattr(editor, "strips") else editor.sequences  # renamed in 4.4
         x = -total_w / 2.0
         for channel, (seq_dir, names, width) in enumerate(layers, start=1):
-            strip = editor.sequences.new_image(
+            strip = strips.new_image(
                 name=f"layer{channel}",
                 filepath=os.path.join(seq_dir, names[0]),
                 channel=channel,
@@ -114,4 +87,51 @@ def blender_encode(out_path, fps, layers, height):
         bpy.ops.render.render(animation=True, scene=scene.name)
     finally:
         bpy.data.scenes.remove(scene)
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError(f"Blender wrote no video to {out_path}")
     return out_path
+
+
+def encode_jobs(jobs):
+    for job in jobs:
+        blender_encode(job["out_path"], job["fps"], [tuple(layer) for layer in job["layers"]], job["height"])
+
+
+def start_background_encode(jobs, work_dir, blender_binary=None):
+    """Run ``encode_jobs`` in a separate background Blender; returns (process, log_path)."""
+    import bpy
+
+    jobs_path = os.path.join(work_dir, "encode_jobs.json")
+    with open(jobs_path, "w") as f:
+        json.dump(jobs, f)
+    log_path = os.path.join(work_dir, "encode.log")
+    cmd = [
+        blender_binary or bpy.app.binary_path,
+        "-b",
+        "--factory-startup",
+        "--python-exit-code",
+        "1",
+        "--python",
+        os.path.abspath(__file__),
+        "--",
+        jobs_path,
+    ]
+    flags = {}
+    if sys.platform == "win32":
+        flags["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with open(log_path, "w") as log:
+        process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **flags)
+    return process, log_path
+
+
+def log_tail(log_path, lines=4):
+    try:
+        with open(log_path, errors="replace") as f:
+            return " | ".join(line.strip() for line in f.read().strip().splitlines()[-lines:])
+    except OSError:
+        return ""
+
+
+if __name__ == "__main__":
+    with open(sys.argv[sys.argv.index("--") + 1]) as f:
+        encode_jobs(json.load(f))

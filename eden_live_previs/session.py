@@ -212,7 +212,7 @@ class EdenSession:
         self.remote_status = status
         if status == "disconnected" and self.status == "ready":
             self.status = "disconnected"
-            self.last_error = f"Connection to {self.backend_label} closed."
+            self.last_error = f"Connection to {self.backend_label} closed (sessions end after 60 minutes); press Connect."
             self._stop_sender()
         self._changed.set()
 

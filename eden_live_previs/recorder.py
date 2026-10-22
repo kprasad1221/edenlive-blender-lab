@@ -137,8 +137,8 @@ def _pair_drafts(mains, drafts):
 class Recorder:
     def __init__(self, session, settings):
         """settings: dict with frames, stream_fps, output_fps, out_dir, name, tail_seconds,
-        reference_path, prompt, seed, reference_pixels, encoder ('AUTO'|'FFMPEG'|'BLENDER'),
-        ffmpeg_path, keep_frames, warmup_timeout."""
+        reference_path, prompt, seed, reference_pixels, keep_frames, warmup_timeout, and
+        optionally encoder ("AUTO" = background Blender, "INPROCESS" = this process)."""
         self.session = session
         self.s = settings
         self.frames = list(settings["frames"])
@@ -166,9 +166,10 @@ class Recorder:
         self.recording = False
         self._main_since_start = 0
         self._future = None
-        self._encode_thread = None
-        self._encode_error = ""
+        self._encode_proc = None
+        self._encode_log = ""
         self._sequences = {}
+        self.kept_frames = ""
         self._prev_fps = session.fps
 
     @property
@@ -277,11 +278,15 @@ class Recorder:
                 self._finalize()
             except Exception as exc:
                 self._fail(f"Finalizing failed: {exc}")
-        elif self.phase == "ENCODE" and self._encode_thread is not None and not self._encode_thread.is_alive():
-            if self._encode_error:
-                self._fail(self._encode_error)
-            else:
-                self._done()
+        elif self.phase == "ENCODE" and self._encode_proc is not None and self._encode_proc.poll() is not None:
+            code, self._encode_proc = self._encode_proc.returncode, None
+            missing = [p for p in self._video_outputs() if not os.path.isfile(p) or os.path.getsize(p) == 0]
+            if code == 0 and not missing:
+                self._done("background Blender")
+                return
+            detail = encode.log_tail(self._encode_log) or f"exit code {code}"
+            self.message = "Background encode failed; encoding here instead"
+            self._encode_here(f"background Blender: {detail}; ")
 
     def _finalize(self):
         mains = self.writer.entries["main_video"]
@@ -335,50 +340,69 @@ class Recorder:
 
         self.phase = "ENCODE"
         self.message = "Encoding MP4"
-        ffmpeg = encode.find_ffmpeg(self.s.get("ffmpeg_path", ""))
-        encoder = self.s.get("encoder", "AUTO")
-        if encoder == "FFMPEG" and not ffmpeg:
-            raise UserError("ffmpeg not found; set its path in the add-on preferences or use the Blender encoder.")
-        if ffmpeg and encoder != "BLENDER":
-            self._encode_error = ""
-            self._encode_thread = threading.Thread(target=self._encode_ffmpeg, args=(ffmpeg,), daemon=True)
-            self._encode_thread.start()
-        else:
-            self._encode_blender()
-            self._done()
-
-    def _encode_ffmpeg(self, ffmpeg):
-        seq = self._sequences
+        if self.s.get("encoder", "AUTO") == "INPROCESS":
+            self._encode_here()
+            return
         try:
-            fps = self.s["output_fps"]
-            encode.ffmpeg_encode(ffmpeg, self.outputs["main"], fps, [seq["main"][0]])
-            encode.ffmpeg_encode(ffmpeg, self.outputs["side_by_side"], fps, [seq["draft"][0], seq["main"][0]])
-            encode.ffmpeg_encode(ffmpeg, self.outputs["raw"], self.s["stream_fps"], [seq["raw"][0]])
+            self._encode_proc, self._encode_log = encode.start_background_encode(self._encode_jobs(), self.work_dir)
         except Exception as exc:
-            self._encode_error = str(exc)
+            self._encode_here(f"background Blender: {exc}; ")
 
-    def _encode_blender(self):
+    def _video_outputs(self):
+        return [self.outputs[k] for k in ("main", "side_by_side", "raw")]
+
+    def _encode_jobs(self):
         seq = self._sequences
         fps = self.s["output_fps"]
         main_dir, main_names = seq["main"]
         draft_dir, draft_names = seq["draft"]
         raw_dir, raw_names = seq["raw"]
-        encode.blender_encode(self.outputs["main"], fps, [(main_dir, main_names, W)], H)
-        encode.blender_encode(
-            self.outputs["side_by_side"], fps, [(draft_dir, draft_names, W), (main_dir, main_names, W)], H
-        )
-        encode.blender_encode(self.outputs["raw"], self.s["stream_fps"], [(raw_dir, raw_names, W)], H)
+        return [
+            {"out_path": self.outputs["main"], "fps": fps, "height": H, "layers": [[main_dir, main_names, W]]},
+            {
+                "out_path": self.outputs["side_by_side"],
+                "fps": fps,
+                "height": H,
+                "layers": [[draft_dir, draft_names, W], [main_dir, main_names, W]],
+            },
+            {"out_path": self.outputs["raw"], "fps": self.s["stream_fps"], "height": H, "layers": [[raw_dir, raw_names, W]]},
+        ]
 
-    def _done(self):
+    def _encode_here(self, earlier_error=""):
+        """Encode on this (main) thread; blocks the UI, so it is only the fallback."""
+        try:
+            encode.encode_jobs(self._encode_jobs())
+        except Exception as exc:
+            self._fail(f"Encoding failed: {earlier_error}in-process: {exc}")
+            return
+        self._done("in-process Blender")
+
+    def _done(self, encoder):
+        self.report["encoder"] = encoder
+        with open(self.outputs["report"], "w") as f:
+            json.dump(self.report, f, indent=2)
         self.phase = "DONE"
         self.message = f"Saved {os.path.basename(self.outputs['main'])} ({self.report['timeline_coverage']:.0%} of frames matched)"
         self._cleanup()
 
     def _fail(self, text):
+        """Report the failure; frames already received from EdenLive are never deleted."""
         self.phase = "ERROR"
+        self.kept_frames = self._frames_dir()
+        if self.kept_frames:
+            text = f"{text} The recorded PNG frames were kept in {self.kept_frames}"
         self.error = self.session.redact(text)
         self.message = self.error
-        self._cleanup()
+        self._cleanup(keep=bool(self.kept_frames))
+
+    def _frames_dir(self):
+        """Folder holding the best PNG frames received so far, or "" if there are none."""
+        if self.writer is None or not self.writer.entries["main_video"]:
+            return ""
+        seq_main = os.path.join(self.work_dir, "seq", "main")
+        if os.path.isdir(seq_main) and os.listdir(seq_main):
+            return os.path.join(self.work_dir, "seq")
+        return self.work_dir
 
     def cancel(self):
         if self.finished:
@@ -386,6 +410,9 @@ class Recorder:
         streaming = self.phase in ("CONNECTING", "WARMUP", "PLAY", "TAIL")
         self.phase = "CANCELLED"
         self.message = "Recording cancelled"
+        if self._encode_proc is not None:
+            self._encode_proc.kill()
+            self._encode_proc = None
         if self.provider is not None:
             self._end_stream()
             if streaming and self.session.ready:
@@ -394,11 +421,11 @@ class Recorder:
             self.writer.close()
         self._cleanup()
 
-    def _cleanup(self):
+    def _cleanup(self, keep=False):
         if self.provider is not None:
             self.provider.frames = None
         self.drafts = None
-        if self.s.get("keep_frames"):
+        if keep or self.s.get("keep_frames"):
             try:
                 os.remove(os.path.join(self.work_dir, "drafts.npy"))
             except OSError:
