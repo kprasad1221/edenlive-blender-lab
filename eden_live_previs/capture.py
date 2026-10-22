@@ -1,14 +1,16 @@
 """Capture draft frames from Blender. Main thread only.
 
-- ``OffscreenCapture``: draws the scene from the active camera (or the current
-  viewport view) into a GPU offscreen buffer using a 3D Viewport's shading
-  settings. Fast (a few ms), needs a visible 3D Viewport.
+- ``DrawCapture`` / ``OffscreenCapture``: draws the scene from the active camera
+  (or the current viewport view) into a GPU offscreen buffer using a 3D Viewport's
+  shading settings, from inside that viewport's draw callback. Fast (a few ms),
+  needs a visible 3D Viewport.
 - ``render_capture``: renders with the scene's render engine (Workbench/EEVEE
   recommended). Slower, but works in background mode and uses final-render looks.
 """
 
 import os
 import tempfile
+import time
 
 import bpy
 import numpy as np
@@ -43,14 +45,12 @@ class OffscreenCapture:
     def __init__(self):
         self._offscreen = None
         self._size = (0, 0)
-        self._readback = None
 
     def free(self):
         if self._offscreen is not None:
             self._offscreen.free()
         self._offscreen = None
         self._size = (0, 0)
-        self._readback = None
 
     def _ensure(self, width, height):
         import gpu
@@ -61,14 +61,14 @@ class OffscreenCapture:
             self._size = (width, height)
         return self._offscreen
 
-    def capture(self, context, mode="CAMERA", hide_overlays=True, width=imaging.EDEN_W, height=imaging.EDEN_H):
-        """Return a BGRA uint8 frame (top row first)."""
-        if bpy.app.background:
-            raise CaptureError("Viewport capture needs Blender's UI; use the Render capture method in background mode.")
-        found = find_view3d()
-        if found is None:
-            raise CaptureError("Open a 3D Viewport: it provides the shading used for the draft.")
-        _window, _area, region, space = found
+    def capture(self, context, region, space, mode="CAMERA", hide_overlays=True,
+                width=imaging.EDEN_W, height=imaging.EDEN_H):
+        """Draw the view into the offscreen buffer; returns a BGRA uint8 frame (top row first).
+
+        Must run inside a draw callback of ``region`` (see DrawCapture): drawing from a
+        timer or operator uses whatever window's GPU context happens to be current and
+        renders black once another window (such as the preview) has been drawn.
+        """
         scene = context.scene
         depsgraph = context.evaluated_depsgraph_get()
         if mode == "CAMERA":
@@ -107,17 +107,78 @@ class OffscreenCapture:
         finally:
             if hide_overlays:
                 overlay.show_overlays = had_overlays
-        import gpu
-
-        # A flat Buffer is required: numpy misreads the multi-dimensional ones, and
-        # converting texture_color.read() element by element costs ~200 ms per frame.
-        if self._readback is None or len(self._readback) != width * height * 4:
-            self._readback = gpu.types.Buffer("UBYTE", width * height * 4)
-        with offscreen.bind():
-            framebuffer = gpu.state.active_framebuffer_get()
-            framebuffer.read_color(0, 0, width, height, 4, 0, "UBYTE", data=self._readback)
-        rgba = np.frombuffer(self._readback, np.uint8).reshape(height, width, 4)
+        # Read the texture rather than binding the framebuffer (framebuffers are per
+        # GPU context). The Buffer is flattened because numpy misreads the
+        # multi-dimensional ones, and converting element by element costs ~200 ms.
+        buffer = offscreen.texture_color.read()
+        buffer.dimensions = width * height * 4
+        rgba = np.frombuffer(buffer, np.uint8).reshape(height, width, 4)
         return imaging.gpu_rgba_to_bgra(rgba)
+
+
+class DrawCapture:
+    """Captures frames from inside the 3D Viewport's draw callback.
+
+    ``request()`` tags the largest visible 3D Viewport for redraw; its next draw
+    renders the offscreen frame and hands it to ``on_frame(frame, seconds)``.
+    """
+
+    def __init__(self):
+        self.offscreen = OffscreenCapture()
+        self.handle = None
+        self.pending = None
+        self.requested_at = 0.0
+        self.frame = None
+        self.seq = 0
+        self.error = ""
+        self.on_frame = None
+
+    def install(self):
+        if self.handle is None:
+            self.handle = bpy.types.SpaceView3D.draw_handler_add(self._draw, (), "WINDOW", "POST_PIXEL")
+
+    def remove(self):
+        if self.handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self.handle, "WINDOW")
+            self.handle = None
+        self.offscreen.free()
+
+    @property
+    def busy(self):
+        return self.pending is not None
+
+    def request(self, mode="CAMERA", hide_overlays=True):
+        if bpy.app.background:
+            raise CaptureError("Viewport capture needs Blender's UI; use the Render capture method in background mode.")
+        found = find_view3d()
+        if found is None:
+            raise CaptureError("Open a 3D Viewport: it provides the shading used for the draft.")
+        self.install()
+        self.pending = (mode, hide_overlays, found[1].as_pointer())
+        self.requested_at = time.perf_counter()
+        found[1].tag_redraw()
+
+    def cancel(self):
+        self.pending = None
+
+    def _draw(self):
+        pending = self.pending
+        context = bpy.context
+        area = context.area
+        if pending is None or area is None or area.as_pointer() != pending[2]:
+            return
+        self.pending = None
+        start = time.perf_counter()
+        try:
+            frame = self.offscreen.capture(context, context.region, context.space_data, pending[0], pending[1])
+        except Exception as exc:
+            self.error = str(exc)
+            return
+        self.error = ""
+        self.frame = frame
+        self.seq += 1
+        if self.on_frame is not None:
+            self.on_frame(frame, time.perf_counter() - start)
 
 
 def render_capture(scene, width=imaging.EDEN_W, height=imaging.EDEN_H, tmp_dir=None):

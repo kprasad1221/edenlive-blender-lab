@@ -25,6 +25,7 @@ state = SimpleNamespace(
     capture_meter=RateMeter(),
     capture_error="",
     preview_serial=0,
+    preview_size=None,
     capturer=None,
     recorder=None,
     last_recorder=None,
@@ -38,8 +39,17 @@ def prompt_changed():
 
 def get_capturer():
     if state.capturer is None:
-        state.capturer = capture.OffscreenCapture()
+        state.capturer = capture.DrawCapture()
+        state.capturer.on_frame = _on_captured
     return state.capturer
+
+
+def _on_captured(frame, seconds):
+    state.capture_cost = seconds if state.capture_cost == 0 else 0.8 * state.capture_cost + 0.2 * seconds
+    state.capture_meter.tick()
+    session = get_session()
+    if state.recorder is None and session.frame_provider is None:
+        session.push_source_frame(frame)
 
 
 def ensure_preview_image(width=1280, height=704):
@@ -57,14 +67,29 @@ def update_preview(session):
         return False
     width, height, pixels, serial = item
     image = ensure_preview_image(width, height)
+    resized = state.preview_size != (width, height)
+    state.preview_size = (width, height)
     image.pixels.foreach_set(pixels)
     image.update()
     state.preview_serial = serial
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             if area.type == "IMAGE_EDITOR" and area.spaces.active.image == image:
+                if resized:
+                    fit_image_editor(window, area)
                 area.tag_redraw()
     return True
+
+
+def fit_image_editor(window, area):
+    region = next((r for r in area.regions if r.type == "WINDOW"), None)
+    if region is None:
+        return
+    try:
+        with bpy.context.temp_override(window=window, area=area, region=region):
+            bpy.ops.image.view_all(fit_view=True)
+    except Exception:
+        log.debug("could not fit the preview", exc_info=True)
 
 
 def redraw_panels():
@@ -91,15 +116,13 @@ def _tick():
         # Capturing holds the GIL; if it is slow (heavy scene, no GPU) capture less often
         # so the sender thread keeps its steady rate by repeating the newest frame.
         interval = max(1.0 / max(10, settings.fps), state.capture_cost * CAPTURE_DUTY_INVERSE)
-        if now - state.last_capture >= interval:
+        capturer = get_capturer()
+        stalled = capturer.busy and now - capturer.requested_at > 1.0
+        if now - state.last_capture >= interval and (not capturer.busy or stalled):
             state.last_capture = now
             try:
-                frame = get_capturer().capture(context, settings.source_mode, settings.hide_overlays)
-                session.push_source_frame(frame)
-                state.capture_error = ""
-                cost = time.perf_counter() - now
-                state.capture_cost = cost if state.capture_cost == 0 else 0.8 * state.capture_cost + 0.2 * cost
-                state.capture_meter.tick()
+                capturer.request(settings.source_mode, settings.hide_overlays)
+                state.capture_error = capturer.error or ("The 3D Viewport is not redrawing (minimized?)" if stalled else "")
             except capture.CaptureError as exc:
                 state.capture_error = str(exc)
 
@@ -133,7 +156,7 @@ def unregister():
         bpy.app.timers.unregister(tick)
     if state.capturer is not None:
         try:
-            state.capturer.free()
+            state.capturer.remove()
         except Exception:
             pass
         state.capturer = None

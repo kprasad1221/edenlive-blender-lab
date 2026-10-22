@@ -61,11 +61,28 @@ def reference_pixels_for(path, mock):
     return pixels if mock else None
 
 
-def capture_frame(context, settings, method=None):
-    method = method or ("RENDER" if bpy.app.background else "VIEWPORT")
-    if method == "RENDER":
-        return capture.render_capture(context.scene)
-    return live.get_capturer().capture(context, settings.source_mode, settings.hide_overlays)
+VIEWPORT_TIMEOUT = 5.0
+
+
+class ViewportFrameWaiter:
+    """Request one frame from the 3D Viewport's draw callback and poll for it."""
+
+    def __init__(self, settings, mode=None):
+        self.capturer = live.get_capturer()
+        self.seq = self.capturer.seq
+        self.capturer.request(mode or settings.source_mode, settings.hide_overlays)
+        self.started = time.perf_counter()
+
+    def poll(self):
+        """The frame once drawn, None while waiting; raises on timeout or error."""
+        if self.capturer.seq != self.seq:
+            return self.capturer.frame
+        if self.capturer.error:
+            raise capture.CaptureError(self.capturer.error)
+        if time.perf_counter() - self.started > VIEWPORT_TIMEOUT:
+            self.capturer.cancel()
+            raise capture.CaptureError("The 3D Viewport did not redraw; keep it visible while capturing.")
+        return None
 
 
 class EDENLIVE_OT_connect(bpy.types.Operator):
@@ -163,6 +180,13 @@ class EDENLIVE_OT_send_prompt(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def save_reference(settings, frame):
+    path = os.path.join(eden_dir(), f"reference_{time.strftime('%Y%m%d_%H%M%S')}.png")
+    capture.save_bgra_png(imaging.cover_resize(frame, imaging.EDEN_W, imaging.EDEN_H), path)
+    settings.reference_path = path
+    return path
+
+
 class EDENLIVE_OT_capture_reference(bpy.types.Operator):
     bl_idname = "eden_live.capture_reference"
     bl_label = "Capture"
@@ -173,15 +197,30 @@ class EDENLIVE_OT_capture_reference(bpy.types.Operator):
 
     def execute(self, context):
         settings = get_settings(context)
+        if bpy.app.background:
+            save_reference(settings, capture.render_capture(context.scene))
+            return {"FINISHED"}
         try:
-            frame = capture_frame(context, settings)
-        except Exception as exc:
+            waiter = ViewportFrameWaiter(settings)
+        except capture.CaptureError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        path = os.path.join(eden_dir(), f"reference_{time.strftime('%Y%m%d_%H%M%S')}.png")
-        capture.save_bgra_png(imaging.cover_resize(frame, imaging.EDEN_W, imaging.EDEN_H), path)
-        settings.reference_path = path
-        self.report({"INFO"}, f"Reference saved to {path}")
+        scene_name = context.scene.name
+
+        def wait():
+            try:
+                frame = waiter.poll()
+            except capture.CaptureError as exc:
+                live.state.capture_error = str(exc)
+                return None
+            if frame is None:
+                return 0.05
+            scene = bpy.data.scenes.get(scene_name)
+            if scene is not None:
+                save_reference(scene.eden_live, frame)
+            return None
+
+        bpy.app.timers.register(wait, first_interval=0.05)
         return {"FINISHED"}
 
 
@@ -218,17 +257,7 @@ class EDENLIVE_OT_open_preview(bpy.types.Operator):
         area.type = "IMAGE_EDITOR"
         area.spaces.active.image = image
 
-        def fit():
-            for region in area.regions:
-                if region.type == "WINDOW":
-                    try:
-                        with bpy.context.temp_override(window=window, area=area, region=region):
-                            bpy.ops.image.view_all(fit_view=True)
-                    except Exception:
-                        pass
-            return None
-
-        bpy.app.timers.register(fit, first_interval=0.3)
+        bpy.app.timers.register(lambda: live.fit_image_editor(window, area), first_interval=0.3)
         return {"FINISHED"}
 
 
@@ -277,6 +306,7 @@ class EDENLIVE_OT_record(bpy.types.Operator):
 
     _timer = None
     _frame_before = 1
+    _waiter = None
 
     @classmethod
     def poll(cls, context):
@@ -298,7 +328,8 @@ class EDENLIVE_OT_record(bpy.types.Operator):
         live.state.recorder = self.recorder
         live.ensure_preview_image()
         self._frame_before = context.scene.frame_current
-        self._method = settings.record_method
+        self._method = "RENDER" if bpy.app.background else settings.record_method
+        self._waiter = None
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.01, window=context.window)
         wm.modal_handler_add(self)
@@ -311,12 +342,7 @@ class EDENLIVE_OT_record(bpy.types.Operator):
         elif event.type == "TIMER":
             try:
                 if rec.phase == "CAPTURE":
-                    scene = context.scene
-                    scene.frame_set(rec.frames[rec.index])
-                    frame = capture_frame(context, get_settings(context), self._method)
-                    if rec.add_frame(frame):
-                        scene.frame_set(self._frame_before)
-                        rec.begin_stream()
+                    self._capture_step(context, rec)
                 else:
                     rec.poll()
             except Exception as exc:
@@ -325,6 +351,24 @@ class EDENLIVE_OT_record(bpy.types.Operator):
         if rec.finished:
             return self._finish(context)
         return {"PASS_THROUGH"}
+
+    def _capture_step(self, context, rec):
+        scene = context.scene
+        if self._method == "RENDER":
+            scene.frame_set(rec.frames[rec.index])
+            frame = capture.render_capture(scene)
+        elif self._waiter is None:
+            scene.frame_set(rec.frames[rec.index])
+            self._waiter = ViewportFrameWaiter(get_settings(context), mode="CAMERA")
+            return
+        else:
+            frame = self._waiter.poll()
+            if frame is None:
+                return
+            self._waiter = None
+        if rec.add_frame(frame):
+            scene.frame_set(self._frame_before)
+            rec.begin_stream()
 
     def _finish(self, context):
         context.window_manager.event_timer_remove(self._timer)

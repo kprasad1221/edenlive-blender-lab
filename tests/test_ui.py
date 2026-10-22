@@ -38,7 +38,11 @@ failures = []
 
 
 def log(msg):
-    print(msg)
+    session = session_mod.get_session()
+    src, _ = session.source.get()
+    main, _ = session.main.get()
+    means = [f"{float(a[..., :3].mean()):.0f}" if a is not None else "-" for a in (src, main)]
+    print(f"{msg}  [source/main mean {means[0]}/{means[1]}]")
     sys.stdout.flush()
 
 
@@ -83,6 +87,7 @@ def steps():
 
     with bpy.context.temp_override(**ctx):
         assert bpy.ops.eden_live.capture_reference() == {"FINISHED"}
+    yield from wait(lambda: scene.eden_live.reference_path, 10, "reference capture")
     ref = bpy.path.abspath(scene.eden_live.reference_path)
     assert os.path.isfile(ref), ref
     log(f"PASS reference captured: {ref}")
@@ -109,6 +114,16 @@ def steps():
     yield 2.0
     image = bpy.data.images.get(live.PREVIEW_IMAGE)
     assert image is not None and tuple(image.size) == (2560, 704), image and tuple(image.size)
+    import numpy as np
+
+    pixels = np.empty(len(image.pixels), np.float32)
+    image.pixels.foreach_get(pixels)
+    halves = pixels.reshape(704, 2560, 4)[..., :3]
+    left, right = float(halves[:, :1280].mean()), float(halves[:, 1280:].mean())
+    assert left > 0.05 and right > 0.05, (left, right)
+    source, _ = session.source.get()
+    assert float(source[..., :3].mean()) > 5, "captured drafts went black after opening the preview window"
+    log(f"preview pixel means: draft {left:.3f}, main {right:.3f}")
     log(f"PASS preview image updating ({tuple(image.size)}), receiving {session.out_meter.rate():.0f} fps")
 
     scene.eden_live.prompt = "The same temple courtyard at night, lit by torches and blue moonlight."
