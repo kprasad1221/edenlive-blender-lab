@@ -32,6 +32,13 @@ MODEL_NAME = "reactor/eden-live"
 SOURCE_TRACK = "source_video"
 OUTPUT_TRACKS = ("main_video", "draft_video")
 DEFAULT_API_URL = "https://api.reactor.inc"
+API_URL_ENV = "REACTOR_API_URL"
+MAX_SESSION_SECONDS = 60 * 60
+
+
+def api_url():
+    """The Reactor API base URL: https://api.reactor.inc, or $REACTOR_API_URL for development."""
+    return normalize_api_url(os.environ.get(API_URL_ENV, ""))
 
 
 def normalize_api_url(value):
@@ -65,7 +72,7 @@ class CommandRefused(Exception):
 class ReactorBackend:
     label = "Reactor"
 
-    def __init__(self, callbacks, api_key, model=MODEL_NAME, api_url=None, max_session_seconds=None):
+    def __init__(self, callbacks, api_key, model=MODEL_NAME, api_url=None, max_session_seconds=MAX_SESSION_SECONDS):
         self._cb = callbacks
         self._key = api_key
         self._model = model

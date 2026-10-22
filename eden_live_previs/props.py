@@ -12,8 +12,7 @@ DEFAULT_PROMPT = (
 
 
 def _on_prompt(self, context):
-    if self.live_prompt:
-        live.prompt_changed()
+    live.prompt_changed()
 
 
 def _on_fps(self, context):
@@ -43,7 +42,6 @@ class EdenLiveSettings(bpy.types.PropertyGroup):
         type=bpy.types.Text,
         description="Optional Text datablock used as the prompt instead of the field (handy for long prompts)",
     )
-    live_prompt: BoolProperty(name="Send edits live", default=True)
     seed: IntProperty(name="Seed", default=2026092901, min=0, max=2147483647)
     source_mode: EnumProperty(
         name="Draft view",
@@ -62,7 +60,13 @@ class EdenLiveSettings(bpy.types.PropertyGroup):
         update=_on_show_draft,
     )
 
-    record_dir: StringProperty(name="Output", subtype="DIR_PATH", default="//eden_live_renders/")
+    record_dir: StringProperty(
+        name="Output",
+        description="Folder for recorded MP4s. Empty: an eden_live_renders folder next to the .blend file "
+        "(or in the temp folder while the file is unsaved)",
+        subtype="DIR_PATH",
+        default="",
+    )
     record_name: StringProperty(name="Take", default="take")
     record_method: EnumProperty(
         name="Draft render",
@@ -76,16 +80,9 @@ class EdenLiveSettings(bpy.types.PropertyGroup):
         name="Tail (s)", description="Keep streaming the last frame this long to collect delayed output", default=3.0,
         min=1.0, max=15.0,
     )
-    record_encoder: EnumProperty(
-        name="Encoder",
-        items=[
-            ("AUTO", "Auto", "ffmpeg if found, otherwise Blender's built-in encoder"),
-            ("FFMPEG", "ffmpeg", "External ffmpeg (runs in the background)"),
-            ("BLENDER", "Blender", "Blender's built-in FFmpeg via a temporary sequencer scene"),
-        ],
-        default="AUTO",
+    record_keep_frames: BoolProperty(
+        name="Keep PNG frames", description="Keep the PNG sequences next to the MP4s", default=False
     )
-    record_keep_frames: BoolProperty(name="Keep PNG frames", default=False)
 
 
 def get_settings(context=None):

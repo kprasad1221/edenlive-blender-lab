@@ -1,6 +1,6 @@
 """Interactive smoke test: drives the real UI (needs a display, not -b).
 
-    blender --python tests/test_ui.py                 # add-on from this checkout, mock backend
+    blender --python tests/test_ui.py                 # add-on from this checkout, mock backend (EDEN_LIVE_MOCK)
     EDEN_BACKEND=REACTOR REACTOR_API_KEY=rk_... blender --python tests/test_ui.py
 
 Builds the demo scene, opens the EdenLive sidebar, connects, captures a reference,
@@ -62,8 +62,8 @@ def wait(pred, timeout, what):
 
 
 def steps():
-    prefs = bpy.context.preferences.addons[MODULE].preferences
-    prefs.backend = os.environ.get("EDEN_BACKEND", "MOCK")
+    if os.environ.get("EDEN_BACKEND") != "REACTOR":
+        os.environ["EDEN_LIVE_MOCK"] = "1"
     session = session_mod.get_session()
     ctx = window_ctx()
 

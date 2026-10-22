@@ -1,10 +1,9 @@
 import os
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import StringProperty
 
 from . import deps
-from .backends import DEFAULT_API_URL, normalize_api_url
 
 
 def get_prefs(context=None):
@@ -19,13 +18,9 @@ def get_api_key(context=None):
     return key or os.environ.get("REACTOR_API_KEY", "").strip()
 
 
-def _on_api_url(self, context):
-    try:
-        fixed = normalize_api_url(self.api_url)
-    except ValueError:
-        return
-    if fixed != self.api_url:
-        self.api_url = fixed
+def use_mock():
+    """Developer switch: EDEN_LIVE_MOCK=1 replaces Reactor with the offline mock backend."""
+    return os.environ.get("EDEN_LIVE_MOCK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class EDENLIVE_AP_preferences(bpy.types.AddonPreferences):
@@ -37,63 +32,27 @@ class EDENLIVE_AP_preferences(bpy.types.AddonPreferences):
         "never in .blend files. Falls back to the REACTOR_API_KEY environment variable",
         subtype="PASSWORD",
     )
-    backend: EnumProperty(
-        name="Backend",
-        items=[
-            ("REACTOR", "Reactor EdenLive", "Stream to reactor/eden-live (needs an API key; billed per session)"),
-            ("MOCK", "Offline mock", "Local stand-in that repaints the draft; for trying the workflow without a key"),
-        ],
-        default="REACTOR",
-    )
-    api_url: StringProperty(
-        name="API URL",
-        description=f"Reactor API endpoint; empty means {DEFAULT_API_URL}. A missing https:// is added for you",
-        default=DEFAULT_API_URL,
-        update=_on_api_url,
-    )
-    max_session_minutes: IntProperty(
-        name="Max session length (min)",
-        description="Reactor ends a session after this long, even if you forget to press Stop",
-        default=30,
-        min=1,
-        max=1440,
-    )
-    mock_latency: FloatProperty(name="Mock latency (s)", default=1.0, min=0.0, max=5.0)
-    mock_echo_tags: BoolProperty(
-        name="Mock echoes frame tags", description="Exercise the tag-based alignment path", default=False
-    )
-    ffmpeg_path: StringProperty(
-        name="ffmpeg", description="Optional ffmpeg executable for encoding; otherwise PATH, then Blender's own encoder",
-        subtype="FILE_PATH",
-    )
 
     def draw(self, context):
         layout = self.layout
         col = layout.column()
-        col.prop(self, "backend")
-        if self.backend == "REACTOR":
-            col.prop(self, "api_key")
-            if not self.api_key and os.environ.get("REACTOR_API_KEY"):
-                col.label(text="Using REACTOR_API_KEY from the environment", icon="INFO")
-            row = col.row()
-            row.operator("wm.url_open", text="Get an API key", icon="URL").url = "https://reactor.inc/dashboard"
-            col.prop(self, "max_session_minutes")
-            col.prop(self, "api_url")
-        else:
-            col.prop(self, "mock_latency")
-            col.prop(self, "mock_echo_tags")
-        col.prop(self, "ffmpeg_path")
+        col.prop(self, "api_key")
+        if not self.api_key and os.environ.get("REACTOR_API_KEY"):
+            col.label(text="Using REACTOR_API_KEY from the environment", icon="INFO")
+        col.operator("wm.url_open", text="Get an API key", icon="URL").url = "https://reactor.inc/dashboard"
+        if use_mock():
+            col.label(text="EDEN_LIVE_MOCK is set: using the offline mock backend", icon="INFO")
 
-        box = layout.box()
         ok, detail = deps.sdk_status()
-        box.label(text=f"Reactor SDK: {detail}", icon="CHECKMARK" if ok else "ERROR")
-        if not ok:
-            state = deps.install_state()
-            row = box.row()
-            row.enabled = not state["running"]
-            row.operator("eden_live.install_sdk", icon="IMPORT")
-            if state["log"]:
-                for line in state["log"].splitlines():
-                    box.label(text=line)
-            if not bpy.app.online_access:
-                box.label(text="Enable Preferences > System > Allow Online Access first", icon="INFO")
+        if ok:
+            return
+        box = layout.box()
+        box.label(text=f"Reactor SDK: {detail}", icon="ERROR")
+        state = deps.install_state()
+        row = box.row()
+        row.enabled = not state["running"]
+        row.operator("eden_live.install_sdk", icon="IMPORT")
+        for line in state["log"].splitlines():
+            box.label(text=line)
+        if not bpy.app.online_access:
+            box.label(text="Enable Preferences > System > Allow Online Access first", icon="INFO")
