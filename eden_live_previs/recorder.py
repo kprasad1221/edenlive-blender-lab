@@ -169,6 +169,7 @@ class Recorder:
         self._encode_thread = None
         self._encode_error = ""
         self._sequences = {}
+        self.kept_frames = ""
         self._prev_fps = session.fps
 
     @property
@@ -278,10 +279,14 @@ class Recorder:
             except Exception as exc:
                 self._fail(f"Finalizing failed: {exc}")
         elif self.phase == "ENCODE" and self._encode_thread is not None and not self._encode_thread.is_alive():
-            if self._encode_error:
+            self._encode_thread = None
+            if not self._encode_error:
+                self._done()
+            elif self.s.get("encoder") == "FFMPEG":
                 self._fail(self._encode_error)
             else:
-                self._done()
+                self.message = "ffmpeg failed; encoding with Blender instead"
+                self._encode_with_blender(f"{self._encode_error}; ")
 
     def _finalize(self):
         mains = self.writer.entries["main_video"]
@@ -344,8 +349,15 @@ class Recorder:
             self._encode_thread = threading.Thread(target=self._encode_ffmpeg, args=(ffmpeg,), daemon=True)
             self._encode_thread.start()
         else:
+            self._encode_with_blender()
+
+    def _encode_with_blender(self, earlier_error=""):
+        try:
             self._encode_blender()
-            self._done()
+        except Exception as exc:
+            self._fail(f"Encoding failed: {earlier_error}Blender encoder: {exc}")
+            return
+        self._done()
 
     def _encode_ffmpeg(self, ffmpeg):
         seq = self._sequences
@@ -375,10 +387,23 @@ class Recorder:
         self._cleanup()
 
     def _fail(self, text):
+        """Report the failure; frames already received from EdenLive are never deleted."""
         self.phase = "ERROR"
+        self.kept_frames = self._frames_dir()
+        if self.kept_frames:
+            text = f"{text} The recorded PNG frames were kept in {self.kept_frames}"
         self.error = self.session.redact(text)
         self.message = self.error
-        self._cleanup()
+        self._cleanup(keep=bool(self.kept_frames))
+
+    def _frames_dir(self):
+        """Folder holding the best PNG frames received so far, or "" if there are none."""
+        if self.writer is None or not self.writer.entries["main_video"]:
+            return ""
+        seq_main = os.path.join(self.work_dir, "seq", "main")
+        if os.path.isdir(seq_main) and os.listdir(seq_main):
+            return os.path.join(self.work_dir, "seq")
+        return self.work_dir
 
     def cancel(self):
         if self.finished:
@@ -394,11 +419,11 @@ class Recorder:
             self.writer.close()
         self._cleanup()
 
-    def _cleanup(self):
+    def _cleanup(self, keep=False):
         if self.provider is not None:
             self.provider.frames = None
         self.drafts = None
-        if self.s.get("keep_frames"):
+        if keep or self.s.get("keep_frames"):
             try:
                 os.remove(os.path.join(self.work_dir, "drafts.npy"))
             except OSError:

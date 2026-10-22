@@ -36,8 +36,8 @@ draft. Real EdenLive output is far more detailed.*
 
 ## Requirements
 
-- **Blender 4.2 or newer** (tested on 4.2.3 LTS). Installs as a Blender extension. A legacy
-  add-on zip is provided as well.
+- **Blender 4.2 or newer** (tested on 4.2.3 LTS and 5.2.3 LTS, which bundle Python 3.11 and
+  3.13). Installs as a Blender extension. A legacy add-on zip is provided as well.
 - **OS**: Windows x64, macOS 11+ on Apple Silicon or macOS 13+ on Intel, Linux x64 with glibc
   2.34+ (Ubuntu 22.04+, Debian 12+, RHEL 9+). These are the platforms the Reactor Python SDK
   ships native builds for.
@@ -167,9 +167,19 @@ Outputs, in *Output* (default `//eden_live_renders/`):
 | `<take>_raw.mp4` | Everything EdenLive returned, in arrival order, at the stream rate. |
 | `<take>_report.json` | Frame counts, measured latency, alignment coverage, prompt, seed. |
 
-Encoding uses `ffmpeg` from PATH (or the path set in preferences) in the background. Without
-it, the add-on falls back to Blender's built-in FFmpeg through a temporary Video Sequencer
-scene, so no external tools are needed. Press **Esc** to cancel a recording.
+Encoding uses `ffmpeg` in the background, if it can find one: the path set in preferences,
+then PATH, then the usual install locations (`/opt/homebrew/bin`, `/usr/local/bin`,
+`/opt/local/bin`, `/usr/bin`, and on Windows `%ProgramFiles%\ffmpeg\bin`, `C:\ffmpeg\bin` and
+Scoop). That matters on macOS, where Blender started from the Dock doesn't see your shell's PATH.
+Without ffmpeg, or if ffmpeg fails, the add-on encodes with Blender's built-in FFmpeg through a
+temporary Video Sequencer scene, so no external tools are needed. Press **Esc** to cancel a
+recording.
+
+If encoding fails anyway, the frames are never thrown away. The error names the folder that
+holds the PNG sequences (`<take>_work/seq/main` is the aligned output, `seq/draft` is the
+draft, `seq/raw` is the raw stream), and **Open Frames Folder** appears under Record. Encode
+them with any tool, e.g.
+`ffmpeg -framerate 24 -i <take>_work/seq/main/f_%06d.png -c:v libx264 -pix_fmt yuv420p out.mp4`.
 
 ## Architecture
 
@@ -243,6 +253,7 @@ Code map (`eden_live_previs/`):
 |---|---|
 | "Online access is disabled" | Preferences > System > Network > **Allow Online Access**. |
 | "Reactor SDK not available" | Install the zip for *your* platform, or click **Install Reactor SDK** in the add-on preferences (legacy/git installs). On Linux the SDK needs glibc 2.34+. |
+| `ValueError: unknown url type: 'api.reactor.inc/tokens'` | Fixed: the API URL now defaults to `https://api.reactor.inc`, and a URL without `https://` (or with a trailing slash) is corrected on entry and at connect. Update the add-on; leaving the field empty also works. |
 | `AuthError ... 401 Invalid API key` | Re-copy the `rk_...` key from the dashboard; check for spaces. |
 | Status stays at *connecting (waiting)* | Reactor is assigning a GPU; this can take a while under load. Check the **Log** subpanel. |
 | `Start` refused: *image_required* / *prompt_required* | Pick a reference image / write a prompt. |
@@ -252,7 +263,7 @@ Code map (`eden_live_previs/`):
 | "Draft capture 1 fps (300 ms each)" in the panel | Capture is slow (software OpenGL, heavy scene, Rendered shading). Use Solid shading; the stream rate stays steady regardless. |
 | "The 3D Viewport did not redraw" | Keep a 3D Viewport visible (not minimized) while streaming or recording with *Viewport (fast)*, or switch *Draft render* to *Render engine*. |
 | Black or empty preview | Click **Start**: until a world starts, EdenLive shows the staged reference, or black before one is staged. |
-| MP4 not written | Check the Record status line and `<take>_report.json`; set an ffmpeg path, or choose the *Blender* encoder. |
+| MP4 not written | The PNG frames are kept: see the Record status line or **Open Frames Folder**, and `<take>_report.json`. Set an ffmpeg path in preferences, or choose the *Blender* encoder. |
 | Want to try without a key | Preferences > Add-ons > EdenLive Pre-vis > Backend: **Offline mock**. |
 
 ## Development
@@ -267,7 +278,7 @@ tests/test_live_reactor.py   real reactor/eden-live session (needs REACTOR_API_K
 ```
 
 ```bash
-blender -b --factory-startup --python tests/test_headless.py      # 8 checks, ~1 min
+blender -b --factory-startup --python tests/test_headless.py      # 12 checks, ~2 min
 blender --python tests/test_ui.py                                  # opens Blender, quits when done
 REACTOR_API_KEY=rk_... blender -b --factory-startup --python tests/test_live_reactor.py
 ```

@@ -151,6 +151,14 @@ class EDENLIVE_PT_record(EdenLivePanel, bpy.types.Panel):
             last = live.state.last_recorder
             if last is not None:
                 layout.label(text=last.message, icon="CHECKMARK" if last.phase == "DONE" else "INFO")
+                if last.kept_frames:
+                    layout.operator("wm.path_open", text="Open Frames Folder", icon="FILE_FOLDER").filepath = (
+                        last.kept_frames
+                    )
+                elif last.phase == "DONE":
+                    layout.operator("wm.path_open", text="Open Output Folder", icon="FILE_FOLDER").filepath = (
+                        last.out_dir
+                    )
         else:
             layout.progress(factor=rec.progress, type="BAR", text=rec.message)
             layout.label(text="Esc cancels", icon="EVENT_ESC")

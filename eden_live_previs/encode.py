@@ -13,10 +13,33 @@ import subprocess
 import sys
 
 
-def find_ffmpeg(preferred=""):
-    if preferred and os.path.isfile(preferred):
+# Apps started from the macOS Finder/Dock get a minimal PATH without Homebrew/MacPorts,
+# so look in the usual install locations too.
+COMMON_FFMPEG_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/opt/local/bin",
+    "/usr/bin",
+    "/snap/bin",
+    os.path.expandvars(r"%ProgramFiles%\ffmpeg\bin"),
+    r"C:\ffmpeg\bin",
+    os.path.expanduser(r"~\scoop\shims"),
+)
+
+
+def find_ffmpeg(preferred="", search_dirs=COMMON_FFMPEG_DIRS):
+    """ffmpeg from the preferences path, then PATH, then common install locations."""
+    if preferred and os.path.isfile(preferred) and os.access(preferred, os.X_OK):
         return preferred
-    return shutil.which("ffmpeg")
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    for directory in search_dirs:
+        candidate = os.path.join(directory, exe)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def link_sequence(files, out_dir, prefix="f_"):
@@ -87,6 +110,8 @@ def blender_encode(out_path, fps, layers, height):
         scene.view_settings.gamma = 1.0
         render.use_sequencer = True
         render.use_compositing = False
+        if hasattr(render.image_settings, "media_type"):  # Blender 5.0+
+            render.image_settings.media_type = "VIDEO"
         render.image_settings.file_format = "FFMPEG"
         render.ffmpeg.format = "MPEG4"
         render.ffmpeg.codec = "H264"
@@ -97,9 +122,10 @@ def blender_encode(out_path, fps, layers, height):
         render.filepath = out_path
 
         editor = scene.sequence_editor_create()
+        strips = editor.strips if hasattr(editor, "strips") else editor.sequences  # renamed in 4.4
         x = -total_w / 2.0
         for channel, (seq_dir, names, width) in enumerate(layers, start=1):
-            strip = editor.sequences.new_image(
+            strip = strips.new_image(
                 name=f"layer{channel}",
                 filepath=os.path.join(seq_dir, names[0]),
                 channel=channel,

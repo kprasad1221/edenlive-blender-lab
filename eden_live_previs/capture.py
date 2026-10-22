@@ -187,16 +187,19 @@ def render_capture(scene, width=imaging.EDEN_W, height=imaging.EDEN_H, tmp_dir=N
         raise CaptureError("The scene has no active camera.")
     render = scene.render
     settings = render.image_settings
-    saved = (
-        render.resolution_x,
-        render.resolution_y,
-        render.resolution_percentage,
-        render.filepath,
-        render.use_file_extension,
-        settings.file_format,
-        settings.color_mode,
-        settings.color_depth,
-    )
+    fields = [
+        (render, "resolution_x"),
+        (render, "resolution_y"),
+        (render, "resolution_percentage"),
+        (render, "filepath"),
+        (render, "use_file_extension"),
+        (settings, "media_type"),  # Blender 5.0+: must be IMAGE before choosing PNG
+        (settings, "file_format"),
+        (settings, "color_mode"),
+        (settings, "color_depth"),
+    ]
+    fields = [(owner, name) for owner, name in fields if hasattr(owner, name)]
+    saved = [(owner, name, getattr(owner, name)) for owner, name in fields]
     path = os.path.join(tmp_dir or tempfile.gettempdir(), "_eden_live_capture.png")
     try:
         render.resolution_x = width
@@ -204,21 +207,15 @@ def render_capture(scene, width=imaging.EDEN_W, height=imaging.EDEN_H, tmp_dir=N
         render.resolution_percentage = 100
         render.filepath = path
         render.use_file_extension = False
+        if hasattr(settings, "media_type"):
+            settings.media_type = "IMAGE"
         settings.file_format = "PNG"
         settings.color_mode = "RGBA"
         settings.color_depth = "8"
         bpy.ops.render.render(write_still=True, scene=scene.name)
     finally:
-        (
-            render.resolution_x,
-            render.resolution_y,
-            render.resolution_percentage,
-            render.filepath,
-            render.use_file_extension,
-            settings.file_format,
-            settings.color_mode,
-            settings.color_depth,
-        ) = saved
+        for owner, name, value in saved:
+            setattr(owner, name, value)
     return load_image_bgra(path)
 
 

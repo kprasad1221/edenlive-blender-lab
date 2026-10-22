@@ -179,7 +179,7 @@ def test_mock_session():
     session.shutdown()
 
 
-def _record(name, encoder, echo_tags, n_frames=48):
+def _run_recording(name, encoder, echo_tags, n_frames, keep_frames=True):
     scene = bpy.context.scene
     scene.frame_start, scene.frame_end = 1, n_frames
     session = EdenSession()
@@ -198,7 +198,7 @@ def _record(name, encoder, echo_tags, n_frames=48):
         "seed": 3,
         "reference_pixels": capture.load_image_bgra(ref, max_side=256),
         "encoder": encoder,
-        "keep_frames": True,
+        "keep_frames": keep_frames,
         "warmup_timeout": 30.0,
     }
     rec = Recorder(session, settings)
@@ -215,8 +215,13 @@ def _record(name, encoder, echo_tags, n_frames=48):
         rec.poll()
         time.sleep(0.02)
         assert time.perf_counter() < deadline, f"stuck in {rec.phase}"
-    assert rec.phase == "DONE", rec.message
     session.shutdown()
+    return rec, settings, drafts, capture_s
+
+
+def _record(name, encoder, echo_tags, n_frames=48):
+    rec, settings, drafts, capture_s = _run_recording(name, encoder, echo_tags, n_frames)
+    assert rec.phase == "DONE", rec.message
 
     report = rec.report
     print(f"  {name}: capture {capture_s:.1f}s, report {report}")
@@ -264,9 +269,92 @@ def test_record_blender():
     _record("take_blender", "BLENDER", echo_tags=True)
 
 
+@check("api url normalization (missing scheme, trailing slash, bad input)")
+def test_api_url():
+    norm = backends.normalize_api_url
+    assert norm("") == norm(None) == norm("   ") == "https://api.reactor.inc"
+    assert norm("api.reactor.inc") == "https://api.reactor.inc"
+    assert norm("api.reactor.inc/") == "https://api.reactor.inc"
+    assert norm(" https://api.reactor.inc/// ") == "https://api.reactor.inc"
+    assert norm("HTTPS://api.reactor.inc") == "https://api.reactor.inc"
+    assert norm("http://localhost:8080/") == "http://localhost:8080"
+    assert norm("staging.example.com/api/") == "https://staging.example.com/api"
+    for bad in ("ftp://api.reactor.inc", "https://", "://"):
+        try:
+            norm(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} should be rejected")
+    backend = backends.ReactorBackend(None, "rk_test", api_url="api.reactor.inc/")
+    assert backend._api_url == "https://api.reactor.inc"
+    from types import SimpleNamespace
+
+    from eden_live_previs import prefs as prefs_module
+
+    assert prefs_module.EDENLIVE_AP_preferences.__annotations__["api_url"].keywords["default"] == "https://api.reactor.inc"
+    typed = SimpleNamespace(api_url="api.reactor.inc/")
+    prefs_module._on_api_url(typed, None)
+    assert typed.api_url == "https://api.reactor.inc", typed.api_url
+
+
+@check("ffmpeg discovery: preference, PATH, common install dirs")
+def test_find_ffmpeg():
+    tmp = tempfile.mkdtemp()
+    fake = os.path.join(tmp, "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+    with open(fake, "w") as f:
+        f.write("#!/bin/sh\n")
+    os.chmod(fake, 0o755)
+    old_path = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = ""
+        assert encode.find_ffmpeg("", search_dirs=()) is None
+        assert encode.find_ffmpeg("", search_dirs=("/nonexistent", tmp)) == fake
+        assert encode.find_ffmpeg(fake, search_dirs=()) == fake
+        os.environ["PATH"] = tmp
+        assert encode.find_ffmpeg("", search_dirs=()) == fake
+    finally:
+        os.environ["PATH"] = old_path
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@check("record: ffmpeg failure falls back to the Blender encoder")
+def test_ffmpeg_fallback():
+    real = encode.ffmpeg_encode
+    encode.ffmpeg_encode = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("simulated ffmpeg crash"))
+    try:
+        rec, *_ = _run_recording("take_fallback", "AUTO", echo_tags=True, n_frames=12, keep_frames=False)
+    finally:
+        encode.ffmpeg_encode = real
+    if not encode.find_ffmpeg():
+        print("  no ffmpeg found, so AUTO used Blender directly")
+    assert rec.phase == "DONE", rec.message
+    assert os.path.getsize(rec.outputs["main"]) > 10000
+    assert not os.path.isdir(rec.work_dir), "work dir should be cleaned up after success"
+
+
+@check("record: a failed encode keeps the PNG frames and says where")
+def test_failed_encode_keeps_frames():
+    real = encode.blender_encode
+    encode.blender_encode = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("simulated encoder failure"))
+    try:
+        rec, *_ = _run_recording("take_failed", "BLENDER", echo_tags=True, n_frames=12, keep_frames=False)
+    finally:
+        encode.blender_encode = real
+    assert rec.phase == "ERROR", rec.phase
+    assert "simulated encoder failure" in rec.message
+    assert rec.kept_frames and rec.kept_frames in rec.message, rec.message
+    main_dir = os.path.join(rec.kept_frames, "main")
+    pngs = [n for n in os.listdir(main_dir) if n.endswith(".png")]
+    assert len(pngs) == 12, pngs
+    assert not os.path.exists(os.path.join(rec.work_dir, "drafts.npy"))
+    print(f"  kept {len(pngs)} aligned frames in {main_dir}")
+
+
 def main():
-    for test in (test_register, test_imaging, test_align, test_demo_capture, test_mock_session,
-                 test_record_ffmpeg, test_record_blender):
+    for test in (test_register, test_imaging, test_align, test_api_url, test_find_ffmpeg, test_demo_capture,
+                 test_mock_session, test_record_ffmpeg, test_record_blender, test_ffmpeg_fallback,
+                 test_failed_encode_keeps_frames):
         test()
     try:
         addon.unregister()
