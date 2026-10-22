@@ -30,12 +30,14 @@ jobs:
           key: blender-${{ env.BLENDER_VERSION }}-linux-x64
 
       - name: Download Blender
+        timeout-minutes: 10
         if: steps.cache-blender.outputs.cache-hit != 'true'
         run: |
           curl -fsSL "https://download.blender.org/release/Blender4.2/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar xJ
           mv "blender-${BLENDER_VERSION}-linux-x64" blender
 
       - name: Headless tests (mock backend, frame capture, record -> MP4)
+        timeout-minutes: 15
         run: blender/blender -b --factory-startup --python tests/test_headless.py
 
       - name: Build extension zips
