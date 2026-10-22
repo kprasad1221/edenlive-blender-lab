@@ -16,11 +16,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: System libraries (software OpenGL/EGL for headless rendering, ffmpeg)
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 libxi6 libxkbcommon0 libsm6 \
-            libxrender1 libxxf86vm1 libxfixes3 ffmpeg
+          packages="libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3"
+          command -v ffmpeg >/dev/null || packages="$packages ffmpeg"
+          sudo -E apt-get update -q
+          sudo -E apt-get install -y -q --no-install-recommends $packages
 
       - name: Cache Blender
         id: cache-blender
