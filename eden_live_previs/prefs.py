@@ -4,6 +4,7 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from . import deps
+from .backends import DEFAULT_API_URL, normalize_api_url
 
 
 def get_prefs(context=None):
@@ -16,6 +17,15 @@ def get_api_key(context=None):
     prefs = get_prefs(context)
     key = prefs.api_key.strip() if prefs else ""
     return key or os.environ.get("REACTOR_API_KEY", "").strip()
+
+
+def _on_api_url(self, context):
+    try:
+        fixed = normalize_api_url(self.api_url)
+    except ValueError:
+        return
+    if fixed != self.api_url:
+        self.api_url = fixed
 
 
 class EDENLIVE_AP_preferences(bpy.types.AddonPreferences):
@@ -35,7 +45,12 @@ class EDENLIVE_AP_preferences(bpy.types.AddonPreferences):
         ],
         default="REACTOR",
     )
-    api_url: StringProperty(name="API URL", description="Leave empty for https://api.reactor.inc", default="")
+    api_url: StringProperty(
+        name="API URL",
+        description=f"Reactor API endpoint; empty means {DEFAULT_API_URL}. A missing https:// is added for you",
+        default=DEFAULT_API_URL,
+        update=_on_api_url,
+    )
     max_session_minutes: IntProperty(
         name="Max session length (min)",
         description="Reactor ends a session after this long, even if you forget to press Stop",

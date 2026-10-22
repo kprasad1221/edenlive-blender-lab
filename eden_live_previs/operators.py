@@ -5,7 +5,7 @@ import time
 import bpy
 
 from . import capture, demo, deps, imaging, live
-from .backends import MockBackend, ReactorBackend
+from .backends import MockBackend, ReactorBackend, normalize_api_url
 from .prefs import get_api_key, get_prefs
 from .props import get_settings, prompt_value
 from .recorder import Recorder
@@ -40,7 +40,10 @@ def backend_factory(context):
         raise UserError("Add your Reactor API key (Preferences > Add-ons > EdenLive, or the field in this panel).")
     session = get_session()
     session.add_secret(key)
-    api_url = prefs.api_url.strip() or None
+    try:
+        api_url = normalize_api_url(prefs.api_url)
+    except ValueError as exc:
+        raise UserError(f"{exc} Fix it in Preferences > Add-ons > EdenLive Pre-vis.")
     max_seconds = prefs.max_session_minutes * 60
 
     def factory(cb):

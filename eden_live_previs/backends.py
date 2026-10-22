@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -30,6 +31,27 @@ from . import imaging
 MODEL_NAME = "reactor/eden-live"
 SOURCE_TRACK = "source_video"
 OUTPUT_TRACKS = ("main_video", "draft_video")
+DEFAULT_API_URL = "https://api.reactor.inc"
+
+
+def normalize_api_url(value):
+    """Turn user input like ``api.reactor.inc/`` into ``https://api.reactor.inc``.
+
+    The SDK builds request URLs by appending paths such as ``/tokens``, so a missing
+    scheme fails with "unknown url type" and a trailing slash doubles it.
+    """
+    url = (value or "").strip()
+    if not url:
+        return DEFAULT_API_URL
+    if "://" not in url:
+        url = "https://" + url.lstrip("/")
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"API URL must use https:// (got {value!r}).")
+    if not parts.netloc:
+        raise ValueError(f"API URL has no host (got {value!r}).")
+    return f"{scheme}://{parts.netloc}{parts.path}".rstrip("/")
 
 
 class CommandRefused(Exception):
@@ -47,7 +69,7 @@ class ReactorBackend:
         self._cb = callbacks
         self._key = api_key
         self._model = model
-        self._api_url = api_url
+        self._api_url = normalize_api_url(api_url)
         self._max_session_seconds = max_session_seconds
         self._reactor = None
         self._source = None
@@ -55,9 +77,7 @@ class ReactorBackend:
     async def connect(self):
         from reactor_sdk import Reactor
 
-        kwargs = {}
-        if self._api_url:
-            kwargs["api_url"] = self._api_url
+        kwargs = {"api_url": self._api_url}
         if self._max_session_seconds:
             kwargs["max_session_duration_seconds"] = int(self._max_session_seconds)
         reactor = Reactor(model_name=self._model, api_key=self._key, **kwargs)
