@@ -212,7 +212,7 @@ class EdenSession:
         self.remote_status = status
         if status == "disconnected" and self.status == "ready":
             self.status = "disconnected"
-            self.last_error = "Connection to Reactor closed."
+            self.last_error = f"Connection to {self.backend_label} closed."
             self._stop_sender()
         self._changed.set()
 
@@ -330,6 +330,7 @@ class EdenSession:
                 log.debug("disconnect failed: %s", exc)
 
     async def _disconnect(self):
+        self.status = "disconnecting"
         self._stop_sender()
         await self._teardown_backend()
         self.status = "disconnected"

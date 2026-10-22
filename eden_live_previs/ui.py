@@ -7,6 +7,7 @@ from .session import get_session
 STATUS_ICONS = {
     "disconnected": "UNLINKED",
     "connecting": "SORTTIME",
+    "disconnecting": "SORTTIME",
     "ready": "LINKED",
     "error": "ERROR",
 }
@@ -103,7 +104,9 @@ class EDENLIVE_PT_live(EdenLivePanel, bpy.types.Panel):
         )
 
         layout.prop(settings, "show_draft")
-        layout.operator("eden_live.open_preview", icon="WINDOW")
+        row = layout.row(align=True)
+        row.operator("eden_live.open_preview", text="Preview: Split", icon="SPLIT_VERTICAL").target = "SPLIT"
+        row.operator("eden_live.open_preview", text="Window", icon="WINDOW").target = "WINDOW"
 
         if session.status == "ready":
             box = layout.box().column(align=True)

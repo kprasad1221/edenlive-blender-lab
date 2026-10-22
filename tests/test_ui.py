@@ -73,16 +73,17 @@ def steps():
     ctx = window_ctx()
     space = ctx["area"].spaces.active
     space.show_region_ui = True
-    for region in ctx["area"].regions:
-        if region.type == "UI" and hasattr(region, "active_panel_category"):
-            try:
-                region.active_panel_category = "EdenLive"
-            except Exception:
-                pass
     with bpy.context.temp_override(**ctx):
         bpy.ops.view3d.view_camera()
     scene = bpy.context.scene
     scene.frame_end = 48
+    yield 0.5
+    for region in ctx["area"].regions:
+        if region.type == "UI":
+            try:
+                region.active_panel_category = "EdenLive"
+            except Exception:
+                pass
     yield 0.5
 
     with bpy.context.temp_override(**ctx):
@@ -92,6 +93,8 @@ def steps():
     assert os.path.isfile(ref), ref
     log(f"PASS reference captured: {ref}")
 
+    if os.environ.get("EDEN_SHOT_PAUSE"):
+        yield float(os.environ["EDEN_SHOT_PAUSE"])
     with bpy.context.temp_override(**ctx):
         bpy.ops.eden_live.connect()
     yield from wait(lambda: session.status in ("ready", "error"), 180, "connect")
@@ -108,8 +111,12 @@ def steps():
         f"{live.state.capture_meter.rate():.1f} fps at {live.state.capture_cost * 1000:.0f} ms each")
 
     with bpy.context.temp_override(**ctx):
-        bpy.ops.eden_live.open_preview()
+        bpy.ops.eden_live.open_preview(target="SPLIT")
     yield 1.0
+    ctx = window_ctx()
+    editors = [a for a in ctx["window"].screen.areas if a.type == "IMAGE_EDITOR"]
+    assert editors and editors[0].spaces.active.image.name == live.PREVIEW_IMAGE
+    log("PASS preview split next to the 3D Viewport")
     scene.eden_live.show_draft = True
     yield 2.0
     image = bpy.data.images.get(live.PREVIEW_IMAGE)
@@ -125,6 +132,8 @@ def steps():
     assert float(source[..., :3].mean()) > 5, "captured drafts went black after opening the preview window"
     log(f"preview pixel means: draft {left:.3f}, main {right:.3f}")
     log(f"PASS preview image updating ({tuple(image.size)}), receiving {session.out_meter.rate():.0f} fps")
+    if os.environ.get("EDEN_SHOT_PAUSE"):
+        yield float(os.environ["EDEN_SHOT_PAUSE"])
 
     scene.eden_live.prompt = "The same temple courtyard at night, lit by torches and blue moonlight."
     yield from wait(lambda: "night" in session.state.get("prompt", ""), 10, "live prompt")
@@ -152,6 +161,7 @@ def steps():
     with bpy.context.temp_override(**ctx):
         bpy.ops.eden_live.disconnect()
     yield from wait(lambda: session.status == "disconnected", 15, "disconnect")
+    assert not session.last_error, session.last_error
     log("PASS stopped")
 
 

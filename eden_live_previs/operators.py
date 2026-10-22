@@ -244,20 +244,40 @@ class EDENLIVE_OT_reference_from_output(bpy.types.Operator):
 
 class EDENLIVE_OT_open_preview(bpy.types.Operator):
     bl_idname = "eden_live.open_preview"
-    bl_label = "Open Preview Window"
-    bl_description = "Open a window showing the live EdenLive output"
+    bl_label = "Show Preview"
+    bl_description = "Show the live EdenLive output in an Image Editor"
+
+    target: bpy.props.EnumProperty(
+        name="Where",
+        items=[
+            ("SPLIT", "Split Viewport", "Split the 3D Viewport and show the output on the right"),
+            ("WINDOW", "New Window", "Open a separate window (e.g. for a second monitor)"),
+        ],
+        default="SPLIT",
+    )
 
     def execute(self, context):
         image = live.ensure_preview_image()
-        before = set(context.window_manager.windows[:])
-        bpy.ops.wm.window_new()
-        new = [w for w in context.window_manager.windows if w not in before]
-        window = new[0] if new else context.window_manager.windows[-1]
-        area = max(window.screen.areas, key=lambda a: a.width * a.height)
-        area.type = "IMAGE_EDITOR"
-        area.spaces.active.image = image
-
-        bpy.app.timers.register(lambda: live.fit_image_editor(window, area), first_interval=0.3)
+        wm = context.window_manager
+        if self.target == "SPLIT":
+            found = capture.find_view3d()
+            if found is None:
+                self.report({"ERROR"}, "No 3D Viewport to split.")
+                return {"CANCELLED"}
+            window, area, region, _space = found
+            before = {a.as_pointer() for a in window.screen.areas}
+            with context.temp_override(window=window, screen=window.screen, area=area, region=region):
+                bpy.ops.screen.area_split(direction="VERTICAL", factor=0.5)
+            new = [a for a in window.screen.areas if a.as_pointer() not in before]
+            target = max([area, *new], key=lambda a: a.x)
+        else:
+            before = {w.as_pointer() for w in wm.windows}
+            bpy.ops.wm.window_new()
+            window = next((w for w in wm.windows if w.as_pointer() not in before), wm.windows[-1])
+            target = max(window.screen.areas, key=lambda a: a.width * a.height)
+        target.type = "IMAGE_EDITOR"
+        target.spaces.active.image = image
+        bpy.app.timers.register(lambda: live.fit_image_editor(window, target), first_interval=0.3)
         return {"FINISHED"}
 
 
