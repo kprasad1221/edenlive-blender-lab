@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="528" viewBox="0 0 960 528">
+  <rect width="960" height="528" fill="#1d2228"/>
+  <rect x="16" y="16" width="928" height="496" fill="none" stroke="#4a5563" stroke-width="3" stroke-dasharray="14 10"/>
+  <text x="480" y="250" fill="#c9d1d9" font-family="Helvetica, Arial, sans-serif" font-size="34" text-anchor="middle">EdenLive output GIF goes here</text>
+  <text x="480" y="300" fill="#8b949e" font-family="Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle">docs/media/eden_live_output.gif (record with Record Timeline, convert the side-by-side MP4)</text>
+</svg>

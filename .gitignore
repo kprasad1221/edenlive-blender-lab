@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+dist/
+eden_live_previs/wheels/
+*.blend1
+eden_live_renders/
+eden_live/
+.DS_Store

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BLENDER_VERSION: "4.2.3"
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries (software OpenGL/EGL for headless rendering, ffmpeg)
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          packages="libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3"
+          command -v ffmpeg >/dev/null || packages="$packages ffmpeg"
+          # man-db's trigger can stall apt for many minutes on hosted runners.
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo -E apt-get update -q
+          sudo -E apt-get install -y -q --no-install-recommends $packages
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+
+      - name: Download Blender
+        timeout-minutes: 10
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://download.blender.org/release/Blender4.2/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar xJ
+          mv "blender-${BLENDER_VERSION}-linux-x64" blender
+
+      - name: Headless tests (mock backend, frame capture, record -> MP4)
+        timeout-minutes: 15
+        run: blender/blender -b --factory-startup --python tests/test_headless.py
+
+      - name: Build extension zips
+        run: python3 tools/build_extension.py --blender blender/blender
+
+      - name: Install the Linux extension and import the bundled SDK
+        run: |
+          export BLENDER_USER_RESOURCES="$RUNNER_TEMP/blender-user"
+          blender/blender -b --command extension install-file -r user_default -e dist/eden_live_previs-*-linux_x64.zip
+          blender/blender -b --python-expr "import addon_utils, reactor_sdk, sys; assert addon_utils.check('bl_ext.user_default.eden_live_previs')[1]; print('reactor-sdk', reactor_sdk.__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eden-live-previs-zips
+          path: dist/*.zip
