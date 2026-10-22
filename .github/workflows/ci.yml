@@ -22,6 +22,8 @@ jobs:
         run: |
           packages="libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3"
           command -v ffmpeg >/dev/null || packages="$packages ffmpeg"
+          # man-db's trigger can stall apt for many minutes on hosted runners.
+          sudo rm -f /var/lib/man-db/auto-update
           sudo -E apt-get update -q
           sudo -E apt-get install -y -q --no-install-recommends $packages
 
