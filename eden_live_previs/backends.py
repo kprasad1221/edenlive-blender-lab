@@ -102,10 +102,15 @@ class ReactorBackend:
         except ReactorError as err:
             raise CommandRefused(command, getattr(err, "code", None), getattr(err, "message", None) or str(err))
 
-    def push_frame(self, bgra, user_data=None):
+    def push_frame(self, bgra, user_data=None, lateness=0.0):
+        """``lateness``: seconds since the frame's scheduled send time; the frame is
+        stamped with that time so the stream stays evenly spaced."""
+        from reactor_sdk import time_micros
+
         source = self._source
         if source is not None:
-            source.push_frame(bgra, user_data=user_data or None)
+            stamp = time_micros() - int(max(0.0, lateness) * 1e6)
+            source.push_frame(bgra, user_data=user_data or None, capture_time_us=stamp)
 
 
 class MockBackend:
@@ -228,7 +233,7 @@ class MockBackend:
         self._cb.on_message({"type": "state_update", "data": snapshot})
         return {"type": "state_update", "data": snapshot}
 
-    def push_frame(self, bgra, user_data=None):
+    def push_frame(self, bgra, user_data=None, lateness=0.0):
         with self._lock:
             st = self.state
             if st["started"] and not st["paused"] and st["source"] == "client":

@@ -12,10 +12,10 @@ from .recorder import Recorder
 from .session import UserError, get_session
 
 
-def resolve_path(path, fallback_subdir="eden_live"):
+def resolve_path(path):
     """bpy.path.abspath, but relative paths in an unsaved file go to the temp dir."""
     if path.startswith("//") and not bpy.data.filepath:
-        return os.path.join(tempfile.gettempdir(), fallback_subdir, path[2:])
+        return os.path.join(tempfile.gettempdir(), "eden_live_unsaved", path[2:])
     return bpy.path.abspath(path)
 
 
@@ -247,7 +247,7 @@ def recorder_settings(context, settings):
     mock = session.backend_label == MockBackend.label or (prefs is not None and prefs.backend == "MOCK")
     scene_fps = scene.render.fps / scene.render.fps_base
     stream_fps = max(10.0, min(60.0, scene_fps))
-    out_dir = resolve_path(settings.record_dir or "//eden_live_renders/", "eden_live_renders")
+    out_dir = resolve_path(settings.record_dir or "//eden_live_renders/")
     os.makedirs(out_dir, exist_ok=True)
     return {
         "frames": range(scene.frame_start, scene.frame_end + 1, max(1, scene.frame_step)),

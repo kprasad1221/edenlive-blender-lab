@@ -36,6 +36,11 @@ FRIENDLY_CODES = {
 }
 
 
+# A push delayed by a main-thread stall (Python code holding the GIL) is sent late
+# but stamped with its scheduled time; a longer stall restarts the schedule.
+MAX_BACKLOG = 0.5
+
+
 class UserError(Exception):
     pass
 
@@ -414,8 +419,10 @@ class EdenSession:
             if now < next_t:
                 self._sender_stop.wait(next_t - now)
                 continue
+            scheduled = next_t
             next_t += period
-            if now - next_t > 3 * period:
+            if now - scheduled > MAX_BACKLOG:
+                scheduled = now
                 next_t = now + period
             backend = self.backend
             if backend is None or self.status != "ready":
@@ -429,7 +436,7 @@ class EdenSession:
             if item is None or item[0] is None:
                 continue
             try:
-                backend.push_frame(item[0], item[1])
+                backend.push_frame(item[0], item[1], now - scheduled)
                 self.in_meter.tick()
                 warned = False
             except Exception as exc:

@@ -60,8 +60,8 @@ def fit_height(arr, height):
     return cover_resize(arr, width, height)
 
 
-THUMB_W = 48
-THUMB_H = 27
+THUMB_W = 96
+THUMB_H = 54
 
 
 def thumbnail(bgra):

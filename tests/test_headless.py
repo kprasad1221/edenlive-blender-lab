@@ -113,6 +113,24 @@ def test_align():
     idx3, _ = align.align(pan, sent, noisy, fps)
     assert (np.abs(idx3 - np.arange(n)) <= 1).mean() > 0.9, idx3
 
+    # Realistic stream: hold frame 0, eased-in start (near-identical drafts), jittered
+    # arrivals, then the last frame held for the tail.
+    phase = 3.0 * (np.arange(n) / (n - 1)) ** 2
+    eased = np.stack([np.sin(xs[None, :] + p + np.linspace(0, 2, imaging.THUMB_H)[:, None]) for p in phase])
+    eased = (eased * 0.5 + 0.5).astype(np.float32)
+    hold, tail = 12, 24
+    order = [0] * hold + list(range(n)) + [n - 1] * tail
+    push = 100.0 + (np.arange(len(order)) - hold) / fps
+    stream = [
+        {"thumb": eased[i] + rng.normal(0, 0.005, eased[i].shape), "arrival": t + latency + rng.normal(0, 0.04)}
+        for i, t in zip(order, push)
+    ]
+    idx4, info4 = align.align(eased, sent, stream, fps)
+    err = np.abs(idx4 - np.array(order))
+    assert (err <= 1).mean() > 0.95, (err, info4)
+    _, coverage4 = align.pick_frames(idx4, n)
+    assert coverage4 > 0.9, coverage4
+
 
 @check("demo scene + render-engine capture")
 def test_demo_capture():

@@ -9,17 +9,20 @@ from types import SimpleNamespace
 import bpy
 
 from . import capture
-from .session import get_session
+from .session import RateMeter, get_session
 
 log = logging.getLogger(__name__)
 
 PREVIEW_IMAGE = "EdenLive Preview"
 TICK = 1.0 / 60.0
 PROMPT_DEBOUNCE = 0.6
+CAPTURE_DUTY_INVERSE = 2.5
 
 state = SimpleNamespace(
     prompt_dirty_at=0.0,
     last_capture=0.0,
+    capture_cost=0.0,
+    capture_meter=RateMeter(),
     capture_error="",
     preview_serial=0,
     capturer=None,
@@ -85,12 +88,18 @@ def _tick():
     now = time.perf_counter()
 
     if session.ready and state.recorder is None and session.frame_provider is None:
-        if now - state.last_capture >= 1.0 / max(10, settings.fps):
+        # Capturing holds the GIL; if it is slow (heavy scene, no GPU) capture less often
+        # so the sender thread keeps its steady rate by repeating the newest frame.
+        interval = max(1.0 / max(10, settings.fps), state.capture_cost * CAPTURE_DUTY_INVERSE)
+        if now - state.last_capture >= interval:
             state.last_capture = now
             try:
                 frame = get_capturer().capture(context, settings.source_mode, settings.hide_overlays)
                 session.push_source_frame(frame)
                 state.capture_error = ""
+                cost = time.perf_counter() - now
+                state.capture_cost = cost if state.capture_cost == 0 else 0.8 * state.capture_cost + 0.2 * cost
+                state.capture_meter.tick()
             except capture.CaptureError as exc:
                 state.capture_error = str(exc)
 

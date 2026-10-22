@@ -113,6 +113,8 @@ class EDENLIVE_PT_live(EdenLivePanel, bpy.types.Panel):
             box.label(text=f"World: {world}  chunks: {st.get('chunks', 0)}")
             secs = st.get("seconds")
             box.label(text=f"Sending {session.in_meter.rate():.0f} fps, receiving {session.out_meter.rate():.0f} fps")
+            box.label(text=f"Draft capture {live.state.capture_meter.rate():.0f} fps "
+                      f"({live.state.capture_cost * 1000:.0f} ms each)")
             if secs is not None:
                 box.label(text=f"Last chunk took {secs:.2f} s")
         if live.state.capture_error:
