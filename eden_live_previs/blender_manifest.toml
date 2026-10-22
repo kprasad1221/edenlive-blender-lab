@@ -1,0 +1,34 @@
+schema_version = "1.0.0"
+
+id = "eden_live_previs"
+version = "0.1.0"
+name = "EdenLive Pre-vis"
+tagline = "Turn primitive scenes into live AI pre-vis with Reactor EdenLive"
+maintainer = "EdenLive Pre-vis contributors"
+type = "add-on"
+website = "https://github.com/willemhelmet/Eden-live-blender-reactor"
+tags = ["3D View", "Render", "Animation"]
+
+blender_version_min = "4.2.0"
+license = ["SPDX:MIT"]
+
+# Wheels are fetched by tools/build_extension.py (not committed). Building with
+# --split-platforms produces one zip per platform, each carrying only its wheel.
+platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
+wheels = [
+  "./wheels/reactor_sdk-1.11.0-py3-none-win_amd64.whl",
+  "./wheels/reactor_sdk-1.11.0-py3-none-macosx_11_0_arm64.whl",
+  "./wheels/reactor_sdk-1.11.0-py3-none-macosx_13_0_x86_64.whl",
+  "./wheels/reactor_sdk-1.11.0-py3-none-manylinux_2_34_x86_64.whl",
+]
+
+[permissions]
+network = "Streams draft video to Reactor EdenLive and receives the result"
+files = "Reads reference images, writes references and recorded MP4s"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "*.zip",
+]
