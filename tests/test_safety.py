@@ -188,13 +188,15 @@ class SafetyTests(unittest.TestCase):
 
     def test_offline_backend_has_no_network_or_sdk_dependency(self):
         async def exercise():
-            backend = backends.MockBackend(self.session)
-            await backend.connect()
-            await backend.send_command("set_source", {"source": "client"})
-            await backend.disconnect()
-        with patch("socket.socket.connect", side_effect=AssertionError("Network attempted")), \
-             patch.dict(sys.modules, {"reactor_sdk": None}):
-            asyncio.run(exercise())
+            # Create asyncio's Windows loopback wakeup pipe before blocking sockets.
+            # The backend itself must still perform zero network operations.
+            with patch("socket.socket.connect", side_effect=AssertionError("Network attempted")), \
+                 patch.dict(sys.modules, {"reactor_sdk": None}):
+                backend = backends.MockBackend(self.session)
+                await backend.connect()
+                await backend.send_command("set_source", {"source": "client"})
+                await backend.disconnect()
+        asyncio.run(exercise())
 
 
 if __name__ == "__main__":
