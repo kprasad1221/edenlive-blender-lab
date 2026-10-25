@@ -27,13 +27,14 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from . import imaging
+from .safety import DEFAULT_PAID_SECONDS, paid_limit
 
 MODEL_NAME = "reactor/eden-live"
 SOURCE_TRACK = "source_video"
 OUTPUT_TRACKS = ("main_video", "draft_video")
 DEFAULT_API_URL = "https://api.reactor.inc"
 API_URL_ENV = "REACTOR_API_URL"
-MAX_SESSION_SECONDS = 60 * 60
+MAX_SESSION_SECONDS = DEFAULT_PAID_SECONDS
 
 
 def api_url():
@@ -71,15 +72,20 @@ class CommandRefused(Exception):
 
 class ReactorBackend:
     label = "Reactor"
+    is_paid = True
 
     def __init__(self, callbacks, api_key, model=MODEL_NAME, api_url=None, max_session_seconds=MAX_SESSION_SECONDS):
         self._cb = callbacks
         self._key = api_key
         self._model = model
         self._api_url = normalize_api_url(api_url)
-        self._max_session_seconds = max_session_seconds
+        self._max_session_seconds = paid_limit(max_session_seconds)
         self._reactor = None
         self._source = None
+
+    @property
+    def max_session_seconds(self):
+        return self._max_session_seconds
 
     async def connect(self):
         from reactor_sdk import Reactor
@@ -114,9 +120,12 @@ class ReactorBackend:
         self._cb.on_error(getattr(err, "code", None), getattr(err, "message", None) or str(err))
 
     async def disconnect(self):
-        reactor, self._reactor, self._source = self._reactor, None, None
+        reactor, self._source = self._reactor, None
         if reactor is not None:
             await reactor.disconnect()
+            # Keep the handle on failure so Stop can retry; never claim closure then.
+            reactor.close()
+            self._reactor = None
 
     async def upload_file(self, path):
         return await self._reactor.upload_file(path)
@@ -150,6 +159,7 @@ class MockBackend:
     """
 
     label = "Mock (offline)"
+    is_paid = False
 
     def __init__(self, callbacks, latency=1.0, chunk_frames=12, echo_tags=False):
         self._cb = callbacks

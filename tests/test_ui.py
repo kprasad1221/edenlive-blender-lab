@@ -1,7 +1,6 @@
 """Interactive smoke test: drives the real UI (needs a display, not -b).
 
     blender --python tests/test_ui.py                 # add-on from this checkout, mock backend (EDEN_LIVE_MOCK)
-    EDEN_BACKEND=REACTOR REACTOR_API_KEY=rk_... blender --python tests/test_ui.py
 
 Builds the demo scene, opens the EdenLive sidebar, connects, captures a reference,
 starts a world, opens the preview window, records the timeline (first 48 frames)
@@ -18,7 +17,7 @@ import addon_utils
 import bpy
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXT = "bl_ext.user_default.eden_live_previs"
+EXT = "bl_ext.user_default.eden_live_lab"
 
 
 def enable_addon():
@@ -62,8 +61,7 @@ def wait(pred, timeout, what):
 
 
 def steps():
-    if os.environ.get("EDEN_BACKEND") != "REACTOR":
-        os.environ["EDEN_LIVE_MOCK"] = "1"
+    os.environ["EDEN_LIVE_MOCK"] = "1"  # UI automation is always free. Paid tests have a separate entrypoint.
     session = session_mod.get_session()
     ctx = window_ctx()
 
@@ -148,6 +146,9 @@ def steps():
     log("PASS pause / resume")
     yield 2.0
 
+    with bpy.context.temp_override(**ctx):
+        bpy.ops.eden_live.disconnect()
+    yield from wait(lambda: session.status == "disconnected", 15, "stop before draft rendering")
     with bpy.context.temp_override(**ctx):
         bpy.ops.eden_live.record("INVOKE_DEFAULT")
     yield 0.5

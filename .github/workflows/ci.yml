@@ -1,65 +1,114 @@
-name: CI
+name: Offline validation and extension build
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: edenlive-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EDEN_LIVE_MOCK: '1'
+  REACTOR_API_KEY: ''
+  EDEN_ALLOW_PAID: ''
+
 jobs:
-  test-and-build:
-    runs-on: ubuntu-24.04
+  safety:
     strategy:
-      fail-fast: false
       matrix:
-        blender: ["4.2.3", "5.2.3"]
-    env:
-      BLENDER_VERSION: ${{ matrix.blender }}
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: System libraries (software OpenGL/EGL for headless rendering, ffmpeg)
-        timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'numpy>=1.26,<3'
+      - run: python -m unittest discover -s tests -p test_safety.py -v
+      - name: Parse Windows launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          packages="libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3"
-          command -v ffmpeg >/dev/null || packages="$packages ffmpeg"
-          # man-db's trigger can stall apt for many minutes on hosted runners.
-          sudo rm -f /var/lib/man-db/auto-update
-          sudo -E apt-get update -q
-          sudo -E apt-get install -y -q --no-install-recommends $packages
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/tools/launch.ps1", [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors) { throw ($parseErrors | Out-String) }
 
-      - name: Cache Blender
-        id: cache-blender
-        uses: actions/cache@v4
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BLENDER_VERSION: '4.2.3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Headless graphics libraries
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgl1-mesa-dri libxi6 libxkbcommon0 libsm6 libxrender1 libxxf86vm1 libxfixes3 ffmpeg
+      - uses: actions/cache@v4
+        id: blender-cache
         with:
           path: blender
-          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
-
+          key: blender-4.2.3-linux-x64
       - name: Download Blender
-        timeout-minutes: 10
-        if: steps.cache-blender.outputs.cache-hit != 'true'
+        if: steps.blender-cache.outputs.cache-hit != 'true'
         run: |
-          series="${BLENDER_VERSION%.*}"
-          curl -fsSL "https://download.blender.org/release/Blender${series}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar xJ
-          mv "blender-${BLENDER_VERSION}-linux-x64" blender
-
-      - name: Headless tests (mock backend, frame capture, record -> MP4)
-        timeout-minutes: 15
-        run: blender/blender -b --factory-startup --python tests/test_headless.py
-
-      - name: Build extension zips
+          curl -fsSL https://download.blender.org/release/Blender4.2/blender-4.2.3-linux-x64.tar.xz -o blender.tar.xz
+          tar xJf blender.tar.xz
+          mv blender-4.2.3-linux-x64 blender
+      - name: Blender integration guards
+        run: blender/blender -b --factory-startup --python-exit-code 1 --python tests/test_blender_guards.py
+      - name: Offline capture, recording, alignment and MP4 tests
+        run: blender/blender -b --factory-startup --python-exit-code 1 --python tests/test_headless.py
+      - name: Build and validate packages
         run: python3 tools/build_extension.py --blender blender/blender
-
-      - name: Install the Linux extension and import the bundled SDK
+      - name: Install Linux extension and import bundled SDK without connecting
         run: |
           export BLENDER_USER_RESOURCES="$RUNNER_TEMP/blender-user"
-          blender/blender -b --command extension install-file -r user_default -e dist/eden_live_previs-*-linux_x64.zip
-          blender/blender -b --python-expr "import addon_utils, reactor_sdk, sys; assert addon_utils.check('bl_ext.user_default.eden_live_previs')[1]; print('reactor-sdk', reactor_sdk.__version__)"
-
+          blender/blender -b --command extension install-file -r user_default -e dist/*-linux_x64.zip
+          blender/blender -b --python-exit-code 1 --python-expr "import addon_utils, reactor_sdk; assert addon_utils.check('bl_ext.user_default.eden_live_lab')[1]; assert reactor_sdk.__version__ == '1.11.0'"
       - uses: actions/upload-artifact@v4
-        if: matrix.blender == '4.2.3'
         with:
-          name: eden-live-previs-zips
+          name: edenlive-lab-all-packages
           path: dist/*.zip
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: offline-test-reports
+          path: /tmp/eden_live_tests/*_report.json
+          if-no-files-found: ignore
+
+  windows-extension:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: edenlive-lab-all-packages
+          path: dist
+      - name: Download Windows Blender
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://download.blender.org/release/Blender4.2/blender-4.2.3-windows-x64.zip -OutFile blender.zip
+          Expand-Archive blender.zip -DestinationPath blender
+      - name: Windows package install, SDK import and Blender guards (no connection)
+        shell: pwsh
+        run: |
+          $blenderExe = (Get-ChildItem blender -Recurse -Filter blender.exe | Select-Object -First 1).FullName
+          $env:BLENDER_USER_RESOURCES = "$env:RUNNER_TEMP/blender-user"
+          $package = (Get-ChildItem dist/*-windows_x64.zip | Select-Object -First 1).FullName
+          & $blenderExe -b --command extension install-file -r user_default -e $package
+          if ($LASTEXITCODE -ne 0) { throw 'Extension installation failed' }
+          & $blenderExe -b --python-exit-code 1 --python-expr "import addon_utils, reactor_sdk; assert addon_utils.check('bl_ext.user_default.eden_live_lab')[1]; assert reactor_sdk.__version__ == '1.11.0'"
+          if ($LASTEXITCODE -ne 0) { throw 'SDK import failed' }
+          & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/test_blender_guards.py
+          if ($LASTEXITCODE -ne 0) { throw 'Blender guards failed' }

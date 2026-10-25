@@ -1,6 +1,8 @@
 import os
 import tempfile
 import time
+import json
+import platform
 
 import bpy
 
@@ -10,6 +12,7 @@ from .prefs import get_api_key, use_mock
 from .props import get_settings, prompt_value
 from .recorder import Recorder
 from .session import UserError, get_session
+from .safety import paid_limit
 
 
 def resolve_path(path):
@@ -23,10 +26,43 @@ def eden_dir():
     return resolve_path("//eden_live/")
 
 
-def backend_factory(context):
+def preflight(context, paid=False):
+    """Local input validation only; never constructs or connects a Reactor client."""
+    settings = get_settings(context)
+    checks = []
+    checks.append((bpy.app.version >= (4, 2, 0), "Blender 4.2 or newer"))
+    checks.append((settings.source_mode != "CAMERA" or context.scene.camera is not None, "Active camera"))
+    path = resolve_path(settings.reference_path) if settings.reference_path else ""
+    valid_ref = False
+    if path and os.path.isfile(path):
+        try:
+            reference_pixels_for(path, mock=True)
+            valid_ref = True
+        except UserError:
+            pass
+    checks.append((valid_ref, "Reference image (use Capture first)"))
+    checks.append((bool(prompt_value(settings)), "Prompt"))
+    if paid:
+        ok, _ = deps.sdk_status()
+        checks.extend([(ok, "Reactor SDK import"), (bool(bpy.app.online_access), "Allow Online Access"),
+                       (bool(get_api_key(context)), "API key present")])
+        try:
+            official = api_url() == "https://api.reactor.inc"
+        except ValueError:
+            official = False
+        checks.append((official, "Official Reactor API endpoint"))
+    return checks
+
+
+def backend_factory(context, paid_confirmed=False):
     """Return (factory, label) for the backend to use, or raise UserError."""
     if use_mock():
         return (lambda cb: MockBackend(cb)), MockBackend.label
+    if not paid_confirmed:
+        raise UserError("Paid connection requires explicit confirmation for this attempt.")
+    failed = [name for ok, name in preflight(context, paid=True) if not ok]
+    if failed:
+        raise UserError("Check inputs first: " + "; ".join(failed))
     ok, detail = deps.sdk_status()
     if not ok:
         raise UserError("Reactor SDK not available. Use a platform-specific build or Preferences > Add-ons > EdenLive > Install.")
@@ -40,9 +76,10 @@ def backend_factory(context):
     except ValueError as exc:
         raise UserError(f"{exc} Check the REACTOR_API_URL environment variable.")
     get_session().add_secret(key)
+    limit = paid_limit(context.window_manager.eden_live_runtime.paid_seconds)
 
     def factory(cb):
-        return ReactorBackend(cb, key, api_url=url)
+        return ReactorBackend(cb, key, api_url=url, max_session_seconds=limit)
 
     return factory, ReactorBackend.label
 
@@ -88,18 +125,83 @@ class EDENLIVE_OT_connect(bpy.types.Operator):
     bl_label = "Connect"
     bl_description = "Open an EdenLive session and start streaming the draft view"
 
+    paid_confirmed: bpy.props.BoolProperty(name="I understand this uses Reactor credits", default=False,
+                                           options={"SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        self.paid_confirmed = False
+        if use_mock(context):
+            return self.execute(context)
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, context):
+        seconds = context.window_manager.eden_live_runtime.paid_seconds
+        self.layout.label(text=f"One paid attempt. Limit: {seconds}s including connection wait.")
+        self.layout.label(text="Pause still uses session time. Stop requests session closure.")
+        self.layout.prop(self, "paid_confirmed")
+
     def execute(self, context):
         settings = get_settings(context)
         session = get_session()
         try:
-            factory, label = backend_factory(context)
+            factory, label = backend_factory(context, self.paid_confirmed)
+            session.fps = float(settings.fps)
+            session.side_by_side = settings.show_draft
+            live.ensure_preview_image()
+            session.connect(factory, label)
         except UserError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        session.fps = float(settings.fps)
-        session.side_by_side = settings.show_draft
-        live.ensure_preview_image()
-        session.connect(factory, label)
+        return {"FINISHED"}
+
+
+class EDENLIVE_OT_check_inputs(bpy.types.Operator):
+    bl_idname = "eden_live.check_inputs"
+    bl_label = "Check Inputs (free)"
+    bl_description = "Validate local inputs and SDK availability without opening a paid session"
+
+    def execute(self, context):
+        try:
+            checks = preflight(context, paid=not use_mock(context))
+        except Exception as exc:
+            get_session()._report_error(exc)
+            self.report({"ERROR"}, get_session().redact(str(exc)))
+            return {"CANCELLED"}
+        for ok, name in checks:
+            get_session()._log(f"Preflight {'PASS' if ok else 'FAIL'}: {name}")
+        failed = sum(not ok for ok, _ in checks)
+        message = f"{len(checks) - failed}/{len(checks)} checks passed; no session opened"
+        context.window_manager.eden_live_runtime.preflight_summary = message
+        self.report({"WARNING"} if failed else {"INFO"}, message)
+        return {"FINISHED"}
+
+
+class EDENLIVE_OT_export_debug(bpy.types.Operator):
+    bl_idname = "eden_live.export_debug"
+    bl_label = "Export Debug Report"
+    bl_description = "Save redacted session stages, errors, timings and frame counts locally"
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.json", options={"HIDDEN"})
+
+    def invoke(self, context, event):
+        self.filepath = "edenlive-debug.json"
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        session = get_session()
+        report = session.debug_report()
+        report["environment"] = {"blender": bpy.app.version_string, "python": platform.python_version(),
+                                 "os": platform.system(), "architecture": platform.machine()}
+        report["capture"] = {"fps": round(live.state.capture_meter.rate(), 2),
+                             "last_error": session.redact(live.state.capture_error)}
+        try:
+            with open(bpy.path.abspath(self.filepath), "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+        except OSError as exc:
+            self.report({"ERROR"}, session.redact(str(exc)))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Redacted report saved. Review it before sharing publicly.")
         return {"FINISHED"}
 
 
@@ -290,7 +392,7 @@ def recorder_settings(context, settings):
         raise UserError("Write a prompt first.")
     if scene.camera is None:
         raise UserError("The scene needs an active camera to record.")
-    mock = session.backend_label == MockBackend.label or use_mock()
+    mock = use_mock()
     scene_fps = scene.render.fps / scene.render.fps_base
     stream_fps = max(10.0, min(60.0, scene_fps))
     out_dir = resolve_path(settings.record_dir or "//eden_live_renders/")
@@ -307,7 +409,7 @@ def recorder_settings(context, settings):
         "seed": settings.seed,
         "reference_pixels": reference_pixels_for(path, mock),
         "keep_frames": settings.record_keep_frames,
-        "warmup_timeout": 90.0,
+        "warmup_timeout": 30.0 if mock else 15.0,
     }
 
 
@@ -322,20 +424,38 @@ class EDENLIVE_OT_record(bpy.types.Operator):
     _timer = None
     _frame_before = 1
     _waiter = None
+    paid_confirmed: bpy.props.BoolProperty(name="I understand this uses Reactor credits", default=False,
+                                           options={"SKIP_SAVE"})
 
     @classmethod
     def poll(cls, context):
-        return live.state.recorder is None and get_session().status in ("ready", "connecting", "disconnected", "error")
+        return live.state.recorder is None and get_session().status == "disconnected"
 
     def invoke(self, context, event):
+        self.paid_confirmed = False
+        if not use_mock(context):
+            return context.window_manager.invoke_props_dialog(self, width=460)
+        return self.execute(context)
+
+    def draw(self, context):
+        self.layout.label(text="Draft frames render locally before the paid session opens.")
+        self.layout.label(text=f"Paid attempt limit: {context.window_manager.eden_live_runtime.paid_seconds}s.")
+        self.layout.label(text="The session closes before MP4 encoding, including on failure.")
+        self.layout.prop(self, "paid_confirmed")
+
+    def execute(self, context):
         settings = get_settings(context)
         session = get_session()
         try:
+            if session.status != "disconnected" or session.backend is not None:
+                raise UserError("Stop live preview before recording; drafts must render without an open session.")
             rec_settings = recorder_settings(context, settings)
-            if not session.ready and session.status != "connecting":
-                factory, label = backend_factory(context)
-                session.fps = rec_settings["stream_fps"]
-                session.connect(factory, label)
+            factory, label = backend_factory(context, self.paid_confirmed)
+            rec_settings.update(connect_factory=factory, connect_label=label)
+            if label == ReactorBackend.label:
+                duration = len(rec_settings["frames"]) / rec_settings["stream_fps"] + rec_settings["tail_seconds"]
+                if duration + 15 > context.window_manager.eden_live_runtime.paid_seconds:
+                    raise UserError("Shot is too long for this attempt limit; shorten the frame range (try 48 frames).")
             self.recorder = Recorder(session, rec_settings)
         except UserError as exc:
             self.report({"ERROR"}, str(exc))
@@ -398,6 +518,7 @@ class EDENLIVE_OT_record(bpy.types.Operator):
         else:
             context.scene.frame_set(self._frame_before)
             self.report({"WARNING"}, rec.message)
+        context.scene.frame_set(self._frame_before)
         return {"CANCELLED"}
 
 
@@ -433,6 +554,8 @@ class EDENLIVE_OT_build_demo(bpy.types.Operator):
 
 
 classes = (
+    EDENLIVE_OT_check_inputs,
+    EDENLIVE_OT_export_debug,
     EDENLIVE_OT_connect,
     EDENLIVE_OT_disconnect,
     EDENLIVE_OT_start,

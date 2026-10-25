@@ -15,7 +15,7 @@ import threading
 
 import bpy
 
-SDK_REQUIREMENT = "reactor-sdk>=1.11,<2"
+SDK_REQUIREMENT = "reactor-sdk==1.11.0"
 
 _install = {"running": False, "log": "", "ok": None}
 

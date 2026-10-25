@@ -30,6 +30,7 @@ state = SimpleNamespace(
     recorder=None,
     last_recorder=None,
     last_redraw=0.0,
+    reported_capture_error="",
 )
 
 
@@ -125,6 +126,9 @@ def _tick():
                 state.capture_error = capturer.error or ("The 3D Viewport is not redrawing (minimized?)" if stalled else "")
             except capture.CaptureError as exc:
                 state.capture_error = str(exc)
+        if state.capture_error and state.capture_error != state.reported_capture_error:
+            session._log("Capture: " + state.capture_error)
+        state.reported_capture_error = state.capture_error
 
     if state.prompt_dirty_at and now - state.prompt_dirty_at > PROMPT_DEBOUNCE:
         state.prompt_dirty_at = 0.0
@@ -141,7 +145,11 @@ def _tick():
 def tick():
     try:
         _tick()
-    except Exception:
+    except Exception as exc:
+        session = get_session()
+        session._report_error(exc)
+        if session.is_paid and not session._stop_requested.is_set():
+            session.disconnect("Blender capture/preview error")
         log.exception("EdenLive tick failed")
     return TICK
 

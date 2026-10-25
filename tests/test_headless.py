@@ -310,6 +310,8 @@ def test_settings_surface():
     }
     old = os.environ.pop("EDEN_LIVE_MOCK", None)
     try:
+        assert prefs_module.use_mock(), "fresh startup must be offline"
+        bpy.context.window_manager.eden_live_runtime.backend_mode = "PAID"
         assert not prefs_module.use_mock()
         os.environ["EDEN_LIVE_MOCK"] = "1"
         assert prefs_module.use_mock()
@@ -317,6 +319,7 @@ def test_settings_surface():
         os.environ.pop("EDEN_LIVE_MOCK", None)
         if old is not None:
             os.environ["EDEN_LIVE_MOCK"] = old
+        bpy.context.window_manager.eden_live_runtime.backend_mode = "MOCK"
 
 
 @check("record: background-encode failure falls back to encoding in-process")
@@ -351,7 +354,7 @@ def test_failed_encode_keeps_frames():
         encode.start_background_encode, encode.blender_encode = real_start, real_encode
     assert rec.phase == "ERROR", rec.phase
     assert "simulated encoder failure" in rec.message and "cannot start" in rec.message, rec.message
-    assert rec.kept_frames and rec.kept_frames in rec.message, rec.message
+    assert rec.kept_frames and "PNG frames were kept" in rec.message, rec.message
     main_dir = os.path.join(rec.kept_frames, "main")
     pngs = [n for n in os.listdir(main_dir) if n.endswith(".png")]
     assert len(pngs) == 12, pngs

@@ -18,9 +18,13 @@ def get_api_key(context=None):
     return key or os.environ.get("REACTOR_API_KEY", "").strip()
 
 
-def use_mock():
-    """Developer switch: EDEN_LIVE_MOCK=1 replaces Reactor with the offline mock backend."""
-    return os.environ.get("EDEN_LIVE_MOCK", "").strip().lower() in ("1", "true", "yes", "on")
+def use_mock(context=None):
+    """Offline by default. The environment flag can force offline, never force paid."""
+    if os.environ.get("EDEN_LIVE_MOCK", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    context = context or bpy.context
+    runtime = getattr(context.window_manager, "eden_live_runtime", None)
+    return runtime is None or runtime.backend_mode != "PAID"
 
 
 class EDENLIVE_AP_preferences(bpy.types.AddonPreferences):
@@ -41,7 +45,7 @@ class EDENLIVE_AP_preferences(bpy.types.AddonPreferences):
             col.label(text="Using REACTOR_API_KEY from the environment", icon="INFO")
         col.operator("wm.url_open", text="Get an API key", icon="URL").url = "https://reactor.inc/dashboard"
         if use_mock():
-            col.label(text="EDEN_LIVE_MOCK is set: using the offline mock backend", icon="INFO")
+            col.label(text="Offline mode: no Reactor connection or credits", icon="INFO")
 
         ok, detail = deps.sdk_status()
         if ok:

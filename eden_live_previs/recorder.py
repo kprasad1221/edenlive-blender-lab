@@ -19,6 +19,7 @@ import queue
 import shutil
 import threading
 import time
+import tempfile
 
 import numpy as np
 
@@ -147,10 +148,10 @@ class Recorder:
             raise UserError("The frame range is empty.")
         self.out_dir = settings["out_dir"]
         self.name = settings["name"]
-        self.work_dir = os.path.join(self.out_dir, f"{self.name}_work")
-        if os.path.isdir(self.work_dir):
-            shutil.rmtree(self.work_dir, ignore_errors=True)
-        os.makedirs(self.work_dir, exist_ok=True)
+        os.makedirs(self.out_dir, exist_ok=True)
+        # A retry never destroys an earlier failed take's diagnostic frames.
+        self.work_dir = tempfile.mkdtemp(prefix=f"{self.name}_work_", dir=self.out_dir)
+        self.name = os.path.basename(self.work_dir).replace("_work_", "_")
         self.drafts = np.lib.format.open_memmap(
             os.path.join(self.work_dir, "drafts.npy"), mode="w+", dtype=np.uint8, shape=(self.n, H, W, 4)
         )
@@ -201,6 +202,9 @@ class Recorder:
 
     def begin_stream(self):
         s = self.s
+        if "connect_factory" in s:
+            self.session.fps = s["stream_fps"]
+            self.session.connect(s["connect_factory"], s["connect_label"])
         self.provider = PlaylistProvider(self.drafts, s["stream_fps"], s["tail_seconds"])
         self.writer = FrameWriter(self.work_dir)
         self.session.add_sink(self._sink)
@@ -208,7 +212,16 @@ class Recorder:
         self.session.frame_provider = self.provider
         self.phase = "CONNECTING"
         self.message = "Waiting for EdenLive"
-        self._future = self.session.wait_ready_and(self._stream)
+        self._future = self.session.wait_ready_and(self._stream_and_close)
+
+    async def _stream_and_close(self):
+        try:
+            await self._stream()
+        finally:
+            self.recording = False
+            closed = await self.session._disconnect("Recording finished or interrupted")
+            if not closed:
+                raise UserError("Recording stopped, but paid session closure is unconfirmed. Check the Reactor dashboard.")
 
     def _sink(self, track, bgra, frame_id, ts, user_data, arrival):
         if self.phase == "WARMUP" and track == "main_video":
@@ -227,6 +240,8 @@ class Recorder:
         self.message = "Waiting for the first generated chunk"
         deadline = time.perf_counter() + s.get("warmup_timeout", 60.0)
         while True:
+            if not session.ready:
+                raise UserError("Session closed while waiting for output.")
             st = session.state
             if st.get("world_id") == world and (st.get("chunks") or 0) >= 1 and self._main_since_start > 0:
                 break
@@ -241,6 +256,8 @@ class Recorder:
         self.message = "Streaming the timeline"
         self.provider.go()
         while not self.provider.finished:
+            if not session.ready:
+                raise UserError("Session closed before the timeline finished.")
             if self.phase == "CANCELLED":
                 return
             if self.provider.state == "TAIL":
@@ -248,7 +265,7 @@ class Recorder:
                 self.message = "Collecting the last generated frames"
             await asyncio.sleep(0.02)
         self.recording = False
-        await session._command("set_paused", {"paused": True})
+        # _stream_and_close ends the session before any local alignment or encoding.
 
     def _end_stream(self):
         self.recording = False
@@ -262,7 +279,7 @@ class Recorder:
         """Advance non-capture phases. Call regularly from the main thread."""
         if self.phase in ("CONNECTING", "WARMUP", "PLAY", "TAIL") and self._future is not None and self._future.done():
             self._end_stream()
-            exc = self._future.exception()
+            exc = UserError("Session stopped before recording completed.") if self._future.cancelled() else self._future.exception()
             if exc is not None:
                 self._fail(str(exc))
                 return
@@ -393,6 +410,13 @@ class Recorder:
             text = f"{text} The recorded PNG frames were kept in {self.kept_frames}"
         self.error = self.session.redact(text)
         self.message = self.error
+        self.session._log("Recording failed: " + self.error)
+        self.session.disconnect("Recording failed")
+        if self._future is not None and not self._future.done():
+            self._future.cancel()
+        self._end_stream()
+        if self.writer is not None:
+            self.writer.close()
         self._cleanup(keep=bool(self.kept_frames))
 
     def _frames_dir(self):
@@ -410,16 +434,19 @@ class Recorder:
         streaming = self.phase in ("CONNECTING", "WARMUP", "PLAY", "TAIL")
         self.phase = "CANCELLED"
         self.message = "Recording cancelled"
+        if self._future is not None and not self._future.done():
+            self._future.cancel()
+        if self.session.backend is not None or self.session.status == "connecting":
+            self.session.disconnect("Recording cancelled")
         if self._encode_proc is not None:
             self._encode_proc.kill()
             self._encode_proc = None
         if self.provider is not None:
             self._end_stream()
-            if streaming and self.session.ready:
-                self.session.set_paused(True)
         if self.writer is not None:
             self.writer.close()
-        self._cleanup()
+        self.kept_frames = self._frames_dir()
+        self._cleanup(keep=bool(self.kept_frames))
 
     def _cleanup(self, keep=False):
         if self.provider is not None:

@@ -3,6 +3,7 @@ from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, Po
 
 from . import live
 from .session import get_session
+from .safety import DEFAULT_PAID_SECONDS, MIN_PAID_SECONDS, MAX_PAID_SECONDS
 
 DEFAULT_PROMPT = (
     "A sunlit ancient temple courtyard in a lush jungle, cinematic and realistic. Weathered stone pillars, "
@@ -21,6 +22,21 @@ def _on_fps(self, context):
 
 def _on_show_draft(self, context):
     get_session().side_by_side = self.show_draft
+
+
+class EdenLiveRuntimeSettings(bpy.types.PropertyGroup):
+    """Session choices belong to the running app, never to a shared .blend file."""
+    backend_mode: EnumProperty(
+        name="Mode", items=[("MOCK", "Offline test (free)", "Local repainting; no API calls"),
+                            ("PAID", "Reactor (paid)", "Send drafts to EdenLive; requires confirmation")],
+        default="MOCK", options={"SKIP_SAVE"},
+    )
+    paid_seconds: IntProperty(
+        name="Attempt limit (seconds)", default=DEFAULT_PAID_SECONDS,
+        min=MIN_PAID_SECONDS, max=MAX_PAID_SECONDS, options={"SKIP_SAVE"},
+        description="Wall-clock limit including connection and GPU waiting; also requested as a server session cap",
+    )
+    preflight_summary: StringProperty(options={"SKIP_SAVE"})
 
 
 class EdenLiveSettings(bpy.types.PropertyGroup):

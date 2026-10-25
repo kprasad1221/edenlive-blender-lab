@@ -1,12 +1,12 @@
 schema_version = "1.0.0"
 
-id = "eden_live_previs"
-version = "0.1.0"
-name = "EdenLive Pre-vis"
+id = "eden_live_lab"
+version = "0.2.0"
+name = "EdenLive Lab"
 tagline = "Turn primitive scenes into live AI pre-vis with Reactor EdenLive"
-maintainer = "EdenLive Pre-vis contributors"
+maintainer = "Pixel Rhythms / EdenLive Pre-vis contributors"
 type = "add-on"
-website = "https://github.com/willemhelmet/Eden-live-blender-reactor"
+website = "https://github.com/kprasad1221/edenlive-blender-lab"
 tags = ["3D View", "Render", "Animation"]
 
 blender_version_min = "4.2.0"

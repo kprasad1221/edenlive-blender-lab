@@ -20,19 +20,33 @@ class EdenLivePanel:
 
 
 class EDENLIVE_PT_main(EdenLivePanel, bpy.types.Panel):
-    bl_label = "EdenLive Pre-vis"
+    bl_label = "EdenLive Lab"
 
     def draw(self, context):
         layout = self.layout
         session = get_session()
         prefs = get_prefs(context)
         mock = use_mock()
+        runtime = context.window_manager.eden_live_runtime
+
+        controls = layout.column()
+        controls.enabled = session.backend is None and session.status not in ("connecting", "disconnecting") and live.state.recorder is None
+        controls.prop(runtime, "backend_mode", expand=True)
+        if not mock:
+            controls.prop(runtime, "paid_seconds")
+            layout.label(text="Paid time includes waiting. Pause does not stop billing.", icon="ERROR")
+        else:
+            layout.label(text="Local simulation • no Reactor credits", icon="CHECKMARK")
 
         col = layout.column(align=True)
         status = session.status
         detail = f" ({session.remote_status})" if status == "connecting" and session.remote_status else ""
-        label = session.backend_label or ("Mock (offline)" if mock else "Reactor")
+        label = (session.backend_label if session.backend is not None else "") or ("Mock (offline)" if mock else "Reactor")
         col.label(text=f"{label}: {status}{detail}", icon=STATUS_ICONS.get(status, "QUESTION"))
+        if session.is_paid and session.status != "disconnected":
+            col.label(text=f"Attempt: {session.elapsed_seconds:.0f}s / {session.limit_seconds}s; {session.remaining_seconds:.0f}s left", icon="TIME")
+        if session.close_result == "unconfirmed":
+            col.label(text="Closure unconfirmed: retry Stop; check Reactor dashboard", icon="ERROR")
         if session.last_error:
             col.label(text=session.last_error, icon="ERROR")
 
@@ -46,10 +60,14 @@ class EDENLIVE_PT_main(EdenLivePanel, bpy.types.Panel):
 
         row = layout.row(align=True)
         row.scale_y = 1.3
-        if status in ("ready", "connecting"):
+        if status in ("ready", "connecting", "disconnecting") or session.backend is not None:
             row.operator("eden_live.disconnect", icon="CANCEL")
         else:
-            row.operator("eden_live.connect", icon="PLAY")
+            row.enabled = live.state.recorder is None
+            row.operator("eden_live.connect", text="Connect (offline)" if mock else "Connect (paid)…", icon="PLAY")
+        layout.operator("eden_live.check_inputs", icon="CHECKMARK")
+        if runtime.preflight_summary:
+            layout.label(text=runtime.preflight_summary)
         layout.operator("eden_live.build_demo", icon="MESH_CUBE")
 
 
@@ -176,6 +194,8 @@ class EDENLIVE_PT_log(EdenLivePanel, bpy.types.Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
+        self.layout.operator("eden_live.export_debug", icon="EXPORT")
+        self.layout.label(text="Reports stay local; prompts and keys are excluded.")
         col = self.layout.column(align=True)
         for line in list(get_session().log)[-12:]:
             col.label(text=line)

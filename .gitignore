@@ -6,3 +6,16 @@ eden_live_previs/wheels/
 eden_live_renders/
 eden_live/
 .DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.jsonl
+*debug*.json
+*_report.json
+*_work_*/
+*.blend
+*.blend2
+blender/
+blender*.zip
+blender*.tar.xz
